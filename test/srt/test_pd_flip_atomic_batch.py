@@ -94,6 +94,7 @@ class FakeReq:
         self.rid = rid
         self.to_finish = None
         self.req_pool_idx = None
+        self.last_node = None
         self.pd_flip_defer_kv_release = False
         self.pd_flip_force_kv_release = False
         self.pd_flip_kv_release_deferred = False
@@ -118,6 +119,8 @@ def target_scheduler(phases, *, fail_init_rid=None):
     scheduler.enable_decode_hicache = False
     scheduler._pd_flip_target_pump_transfer = lambda session: None
     scheduler._pd_flip_target_commit_hicache_restore = lambda decode_req: None
+    scheduler._pd_flip_target_committed_mapping_ready = lambda entry: True
+    scheduler._pd_flip_prepare_target_request_for_adoption = lambda req: None
     scheduler._pd_flip_migration_status_dict = lambda: {}
     scheduler._pd_flip_note_timing = lambda container, name: None
     scheduler._pd_flip_release_target_request = lambda entry: entry.update(
@@ -155,6 +158,54 @@ def target_scheduler(phases, *, fail_init_rid=None):
 
 
 class TestAtomicTargetHandoff(unittest.TestCase):
+    def test_target_commit_validates_each_held_request_after_restore(self):
+        scheduler = target_scheduler(
+            {"r0": "transferred_held", "r1": "transferred_held"}
+        )
+        validated = []
+        scheduler._pd_flip_target_committed_mapping_ready = (
+            lambda entry: validated.append(entry["decode_req"].req.rid) or True
+        )
+
+        out = Scheduler.commit_pd_flip_migration_target(
+            scheduler,
+            PDFlipMigrationTargetCommitReq(session_id="s", rids=["r0", "r1"]),
+        )
+
+        self.assertTrue(out.success)
+        self.assertEqual(validated, ["r0", "r1"])
+
+    def test_target_commit_mapping_failure_aborts_entire_batch(self):
+        scheduler = target_scheduler(
+            {"r0": "transferred_held", "r1": "transferred_held"}
+        )
+
+        def validate(entry):
+            if entry["decode_req"].req.rid == "r1":
+                raise RuntimeError(
+                    "migration target committed KV mapping is incomplete"
+                )
+            return True
+
+        scheduler._pd_flip_target_committed_mapping_ready = validate
+
+        out = Scheduler.commit_pd_flip_migration_target(
+            scheduler,
+            PDFlipMigrationTargetCommitReq(session_id="s", rids=["r0", "r1"]),
+        )
+
+        self.assertFalse(out.success)
+        self.assertEqual(scheduler.waiting_queue, [])
+        self.assertEqual(
+            {
+                entry["phase"]
+                for entry in scheduler.pd_flip_migration_session[
+                    "target_entries"
+                ].values()
+            },
+            {"aborted"},
+        )
+
     def test_target_commit_does_not_schedule_before_activate(self):
         scheduler = target_scheduler(
             {"r0": "transferred_held", "r1": "transferred_held"}

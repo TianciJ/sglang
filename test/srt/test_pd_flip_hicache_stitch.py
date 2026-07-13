@@ -322,6 +322,24 @@ def _target_stitch_ready(entry, *, enabled=True, kv_indices=None):
     return method(scheduler, entry)
 
 
+def _target_committed_mapping_ready(entry, kv_indices):
+    method = _load_class_method(
+        SCHEDULER_PATH, "Scheduler", "_pd_flip_target_committed_mapping_ready"
+    )
+    invalid_positions = _load_class_method(
+        SCHEDULER_PATH, "Scheduler", "_pd_flip_invalid_kv_positions"
+    )
+    scheduler = types.SimpleNamespace(
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=np.asarray([kv_indices], dtype=np.int64)
+        ),
+    )
+    scheduler._pd_flip_invalid_kv_positions = types.MethodType(
+        invalid_positions, scheduler
+    )
+    return method(scheduler, entry)
+
+
 def _target_entry(
     *, h=32, p=64, c0=100, l1=5, start=32, end=100, restore="ready"
 ):
@@ -462,6 +480,22 @@ def test_invalid_kv_positions_supports_numpy_and_torch_like_tensors():
     assert invalid_positions(object(), ArrayTensor([0, 4, -1])) == [0, 2]
 
 
+def test_target_committed_mapping_requires_complete_positive_formal_mapping():
+    entry = _target_entry(c0=4)
+
+    assert _target_committed_mapping_ready(entry, [1, 2, 3, 4])
+    with pytest.raises(
+        RuntimeError,
+        match=r"migration target committed KV mapping is incomplete.*positions=\[3\]",
+    ):
+        _target_committed_mapping_ready(entry, [1, 2, 3])
+    with pytest.raises(
+        RuntimeError,
+        match=r"migration target committed KV mapping is incomplete.*positions=\[1, 2\]",
+    ):
+        _target_committed_mapping_ready(entry, [1, 0, -1, 4])
+
+
 def test_target_full_fallback_does_not_require_hicache_restore():
     entry = _target_entry(h=0, l1=0, start=0, restore="pending")
     entry["decode_req"].prefix_match.needs_local_restore = False
@@ -476,7 +510,7 @@ class Poll:
     Failed = "failed"
 
 
-def _pump_target_entry(entry, *, processor="none"):
+def _pump_target_entry(entry, *, processor="none", prepare_only=False):
     pump = _load_class_method(
         SCHEDULER_PATH,
         "Scheduler",
@@ -509,6 +543,8 @@ def _pump_target_entry(entry, *, processor="none"):
         _pd_flip_target_commit_hicache_restore=lambda decode_req: events.append(
             "commit"
         ),
+        _pd_flip_target_committed_mapping_ready=lambda entry: events.append("validate")
+        or True,
         _pd_flip_release_target_request=lambda entry: events.append("release"),
         _pd_flip_free_target_metadata=lambda entry: events.append("free"),
         _pd_flip_note_timing=lambda *args: None,
@@ -543,9 +579,27 @@ def _pump_target_entry(entry, *, processor="none"):
     session = {
         "manifests": [{"rid": "req"}],
         "target_entries": {"req": entry},
+        "prepare_only": prepare_only,
     }
     pump(scheduler, session)
     return session, events
+
+
+@pytest.mark.parametrize(
+    "prepare_only,expected_events,expected_phase",
+    [
+        (False, ["commit", "validate", "release", "free"], "transferred"),
+        (True, ["free"], "transferred_held"),
+    ],
+)
+def test_target_pump_validates_only_after_non_prepare_restore_commit(
+    prepare_only, expected_events, expected_phase
+):
+    entry, _ = _pumping_entry()
+    session, events = _pump_target_entry(entry, prepare_only=prepare_only)
+
+    assert events == expected_events
+    assert entry["phase"] == expected_phase
 
 
 def _pumping_entry(*, needs_restore=False):
@@ -654,6 +708,7 @@ def test_target_restore_failure_marks_only_failed_rid_for_fallback():
         ),
         _pd_flip_target_metadata_ready=lambda entry: True,
         _pd_flip_target_commit_hicache_restore=lambda decode_req: None,
+        _pd_flip_target_committed_mapping_ready=lambda entry: True,
         _pd_flip_release_target_request=lambda entry: None,
         _pd_flip_free_target_metadata=lambda entry: None,
         _pd_flip_note_timing=lambda *args: None,

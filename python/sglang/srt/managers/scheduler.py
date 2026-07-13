@@ -2415,6 +2415,7 @@ class Scheduler(
                 entry = entries[rid]
                 if not entry.get("drop_on_commit"):
                     self._pd_flip_target_commit_hicache_restore(entry["decode_req"])
+                    self._pd_flip_target_committed_mapping_ready(entry)
         except Exception as exc:
             message = f"target migration commit failed: {exc}"
             self._pd_flip_abort_target_session(session, message)
@@ -4567,6 +4568,7 @@ class Scheduler(
                     ):
                         if not session.get("prepare_only", False):
                             self._pd_flip_target_commit_hicache_restore(decode_req)
+                            self._pd_flip_target_committed_mapping_ready(entry)
                         self._pd_flip_note_timing(entry, "target_transfer_success")
                         if entry.get("fallback_attempted"):
                             self._pd_flip_note_timing(
@@ -4698,6 +4700,38 @@ class Scheduler(
             for index, value in enumerate(index_values)
             if int(value) <= 0
         ]
+
+    def _pd_flip_target_committed_mapping_ready(self, entry: Dict[str, Any]) -> bool:
+        try:
+            committed_len = int(entry["target_committed_len"])
+            req = entry["decode_req"].req
+            formal_kv_indices = self.req_to_token_pool.req_to_token[
+                req.req_pool_idx, :committed_len
+            ]
+            actual_len = len(formal_kv_indices)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "migration target committed KV mapping is incomplete: "
+                "mapping metadata is missing or invalid"
+            ) from exc
+
+        invalid_positions = self._pd_flip_invalid_kv_positions(formal_kv_indices)
+        if actual_len != committed_len or invalid_positions:
+            position_sample = invalid_positions[:16]
+            if actual_len < committed_len and len(position_sample) < 16:
+                missing_sample_len = min(
+                    16 - len(position_sample), committed_len - actual_len
+                )
+                position_sample.extend(
+                    range(actual_len, actual_len + missing_sample_len)
+                )
+            entry["target_invalid_kv_position_sample"] = position_sample
+            raise RuntimeError(
+                "migration target committed KV mapping is incomplete: "
+                f"expected={committed_len}, actual={actual_len}, "
+                f"rid={req.rid}, positions={position_sample}"
+            )
+        return True
 
     def _pd_flip_target_stitch_ready(self, entry: Dict[str, Any]) -> bool:
         if not getattr(
