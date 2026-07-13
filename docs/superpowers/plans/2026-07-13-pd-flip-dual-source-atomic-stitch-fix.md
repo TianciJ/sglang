@@ -36,7 +36,7 @@
 - Consumes: `entry["mooncake_hit_len"]`, `entry["target_committed_len"]`, `decode_req.prefix_match`, `decode_req.hicache_restored_kv_indices`, and `req_to_token_pool` suffix mappings.
 - Produces: `_pd_flip_target_stitch_ready(entry) -> bool`, where `True` means staged coverage is complete even if the formal `[L1,H)` mapping is not committed yet.
 
-- [ ] **Step 1: Write the deferred-mapping regression test**
+- [x] **Step 1: Write the deferred-mapping regression test**
 
 Extend `_target_entry` so its prefix match carries `l1_prefix_len`, `prefix_indices`, and `hicache_restored_kv_indices`. Add a test whose formal table contains zeros only in `[5,32)` while the staged restore indices cover that range:
 
@@ -49,7 +49,7 @@ def test_target_prepare_accepts_staged_l3_indices_before_atomic_commit():
     assert _target_stitch_ready(entry, kv_indices=kv_indices) is True
 ```
 
-- [ ] **Step 2: Run the regression test and confirm the current implementation fails**
+- [x] **Step 2: Run the regression test and confirm the current implementation fails**
 
 Run:
 
@@ -59,7 +59,7 @@ Run:
 
 Expected: FAIL with `uninitialized KV indices remain after stitch`.
 
-- [ ] **Step 3: Add staged segment validation**
+- [x] **Step 3: Add staged segment validation**
 
 Keep `_pd_flip_target_stitch_ready` as the Prepare-facing method, but replace its whole-table check with explicit segment checks:
 
@@ -123,7 +123,7 @@ if expected_restore:
 
 Validate positive indices independently for L1, staged restore, and the formal suffix `[H,C0)`. Error positions for restore must be reported with the `L1` offset; suffix errors must be reported with the `H` offset. All `H>0` staged failures must retain the `migration target HiCache restore failed` prefix so the existing pump requests full-source fallback.
 
-- [ ] **Step 4: Add staged failure tests**
+- [x] **Step 4: Add staged failure tests**
 
 Add focused tests:
 
@@ -162,7 +162,7 @@ def test_target_full_fallback_validates_complete_source_mapping():
 
 Each test must assert the exact failing segment and bounded absolute position sample.
 
-- [ ] **Step 5: Run the HiCache stitch test file**
+- [x] **Step 5: Run the HiCache stitch test file**
 
 Run:
 
@@ -172,7 +172,7 @@ Run:
 
 Expected: all tests pass, including the new deferred-mapping regression.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```powershell
 git add python/sglang/srt/managers/scheduler.py test/srt/test_pd_flip_hicache_stitch.py
@@ -192,7 +192,7 @@ git commit -m "fix(pd-flip): validate staged dual-source coverage"
 - Consumes: `_pd_flip_target_commit_hicache_restore(decode_req)` and staged-ready target entries.
 - Produces: `_pd_flip_target_committed_mapping_ready(entry) -> bool`, which requires every formal mapping in `[0,C0)` to be valid.
 
-- [ ] **Step 1: Write the post-commit validation tests**
+- [x] **Step 1: Write the post-commit validation tests**
 
 Update `target_scheduler()` with a default no-op validator and add:
 
@@ -215,7 +215,7 @@ def test_target_commit_validates_each_formal_mapping(self):
 
 Add a second test where the validator raises on `r1`; assert both entries become `aborted`, no request enters `waiting_queue`, and the result is unsuccessful.
 
-- [ ] **Step 2: Run the new atomic test and confirm it fails**
+- [x] **Step 2: Run the new atomic test and confirm it fails**
 
 Run:
 
@@ -225,7 +225,7 @@ Run:
 
 Expected: FAIL because `commit_pd_flip_migration_target` does not call the validator.
 
-- [ ] **Step 3: Implement the committed mapping validator**
+- [x] **Step 3: Implement the committed mapping validator**
 
 Move the old whole-table logic into a dedicated method:
 
@@ -246,7 +246,7 @@ def _pd_flip_target_committed_mapping_ready(self, entry: Dict[str, Any]) -> bool
     return True
 ```
 
-- [ ] **Step 4: Enforce the validator at both commit sites**
+- [x] **Step 4: Enforce the validator at both commit sites**
 
 In `commit_pd_flip_migration_target`, after each non-drop HiCache commit:
 
@@ -264,7 +264,7 @@ self._pd_flip_target_committed_mapping_ready(entry)
 
 Do not call the formal validator during `prepare_only`; those entries remain `transferred_held` until the explicit Commit request.
 
-- [ ] **Step 5: Run atomic and stitch tests**
+- [x] **Step 5: Run atomic and stitch tests**
 
 Run:
 
@@ -274,7 +274,7 @@ Run:
 
 Expected: all tests pass; no target request is scheduled before Activate.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```powershell
 git add python/sglang/srt/managers/scheduler.py test/srt/test_pd_flip_atomic_batch.py test/srt/test_pd_flip_hicache_stitch.py
@@ -295,7 +295,7 @@ git commit -m "fix(pd-flip): verify mapping after atomic commit"
 - Consumes: completed Tasks 1 and 2.
 - Produces: tested `main` commits and a precise live-experiment acceptance checklist.
 
-- [ ] **Step 1: Run syntax and whitespace checks**
+- [x] **Step 1: Run syntax and whitespace checks**
 
 ```powershell
 & 'C:\Users\Tianci J\anaconda3\python.exe' -m py_compile `
@@ -307,7 +307,7 @@ git diff --check
 
 Expected: exit code 0 with no syntax or whitespace errors.
 
-- [ ] **Step 2: Run the focused regression suite**
+- [x] **Step 2: Run the focused regression suite**
 
 ```powershell
 & 'C:\Users\Tianci J\anaconda3\python.exe' -m pytest `
@@ -320,7 +320,7 @@ Expected: exit code 0 with no syntax or whitespace errors.
 
 Expected: all collected tests pass. If the local environment cannot import an optional SGLang dependency, run the AST-backed stitch and atomic files locally and record the exact collection blocker; do not restart the stopped cluster merely to satisfy local collection.
 
-- [ ] **Step 3: Review the final diff against the design**
+- [x] **Step 3: Review the final diff against the design**
 
 Confirm:
 
@@ -332,7 +332,15 @@ Fallback: H>0 staged failure requests source full transfer
 H=0: full-source validation remains independent of HiCache
 ```
 
-- [ ] **Step 4: Mark this plan complete and commit the plan update**
+Verified on 2026-07-13:
+
+- `py_compile` and `git diff --check`: passed.
+- Stitch and atomic regression files: `74 passed, 6 skipped`.
+- Reconciliation/progressive regression files excluding the pre-existing stale exact-dict assertion: `157 passed, 1 deselected`.
+- The deselected test expects an older request-measurement dictionary and omits fields already added by commit `150f713ef`; the dual-source implementation diff does not modify that status export or test.
+- Final whole-change review: approved after adding stitch-disabled immediate and prepare-to-commit control-flow regressions.
+
+- [x] **Step 4: Mark this plan complete and commit the plan update**
 
 ```powershell
 git add docs/superpowers/plans/2026-07-13-pd-flip-dual-source-atomic-stitch-fix.md
