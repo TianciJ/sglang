@@ -510,7 +510,14 @@ class Poll:
     Failed = "failed"
 
 
-def _pump_target_entry(entry, *, processor="none", prepare_only=False):
+def _pump_target_entry(
+    entry,
+    *,
+    processor="none",
+    prepare_only=False,
+    stitch_enabled=True,
+    real_committed_validator=False,
+):
     pump = _load_class_method(
         SCHEDULER_PATH,
         "Scheduler",
@@ -534,7 +541,9 @@ def _pump_target_entry(entry, *, processor="none", prepare_only=False):
     )
     events = []
     scheduler = types.SimpleNamespace(
-        server_args=types.SimpleNamespace(enable_pd_flip_hicache_stitch=True),
+        server_args=types.SimpleNamespace(
+            enable_pd_flip_hicache_stitch=stitch_enabled
+        ),
         enable_decode_hicache=True,
         req_to_token_pool=types.SimpleNamespace(
             req_to_token=np.arange(1, 101, dtype=np.int64).reshape(1, 100)
@@ -557,6 +566,15 @@ def _pump_target_entry(entry, *, processor="none", prepare_only=False):
         invalid_positions, scheduler
     )
     scheduler._pd_flip_target_stitch_ready = types.MethodType(stitch_ready, scheduler)
+    if real_committed_validator:
+        committed_ready = _load_class_method(
+            SCHEDULER_PATH,
+            "Scheduler",
+            "_pd_flip_target_committed_mapping_ready",
+        )
+        scheduler._pd_flip_target_committed_mapping_ready = types.MethodType(
+            committed_ready, scheduler
+        )
     if processor == "pending":
         scheduler.disagg_decode_transfer_queue = types.SimpleNamespace(
             _process_hicache_local_restores=lambda decode_reqs: None
@@ -583,6 +601,143 @@ def _pump_target_entry(entry, *, processor="none", prepare_only=False):
     }
     pump(scheduler, session)
     return session, events
+
+
+def _preallocated_non_stitch_entry():
+    class Receiver:
+        def send_metadata(self, *args, **kwargs):
+            pass
+
+        def poll(self):
+            return Poll.Success
+
+        def clear(self):
+            pass
+
+        def abort(self):
+            pass
+
+    class Queue:
+        def _pre_alloc(self, req, **kwargs):
+            return ArrayTensor([1, 2, 3, 4])
+
+    prealloc = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_target_prealloc_and_send_metadata",
+        {
+            "DecodeRequest": object,
+            "time": types.SimpleNamespace(monotonic=lambda: 1.0),
+            "TransferBackend": types.SimpleNamespace(FAKE="fake"),
+            "kv_to_page_indices": lambda indices, page_size: np.asarray(indices),
+        },
+    )
+    req = types.SimpleNamespace(
+        rid="req",
+        origin_input_ids=[1, 2, 3, 4],
+        kv_committed_len=4,
+        req_pool_idx=0,
+        bootstrap_room=123,
+        cache_protected_len=0,
+    )
+    entry = {
+        "decode_req": types.SimpleNamespace(req=req, kv_receiver=Receiver()),
+        "phase": "transferring",
+    }
+    scheduler = types.SimpleNamespace(
+        server_args=types.SimpleNamespace(
+            enable_pd_flip_hicache_stitch=False,
+            disaggregation_decode_enable_radix_cache=False,
+        ),
+        disagg_decode_prealloc_queue=Queue(),
+        req_to_metadata_buffer_idx_allocator=types.SimpleNamespace(alloc=lambda: 0),
+        token_to_kv_pool_allocator=types.SimpleNamespace(page_size=1),
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=ArrayTensor([[1, 2, 3, 4]])
+        ),
+        enable_decode_hicache=False,
+        transfer_backend="not-fake",
+        _pd_flip_target_state_indices=lambda req, committed_len: [],
+        _pd_flip_note_timing=lambda *args: None,
+    )
+
+    prealloc(scheduler, entry)
+    return entry
+
+
+def test_non_stitch_immediate_transfer_validates_committed_mapping():
+    entry = _preallocated_non_stitch_entry()
+
+    session, _ = _pump_target_entry(
+        entry,
+        stitch_enabled=False,
+        real_committed_validator=True,
+    )
+
+    assert session.get("last_error") is None, session.get("last_error")
+    assert session["state"] == "target_transferred"
+    assert entry["phase"] == "transferred"
+
+
+def test_non_stitch_prepare_then_commit_validates_committed_mapping():
+    entry = _preallocated_non_stitch_entry()
+    session, _ = _pump_target_entry(
+        entry,
+        prepare_only=True,
+        stitch_enabled=False,
+        real_committed_validator=True,
+    )
+    assert entry["phase"] == "transferred_held"
+
+    commit = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "commit_pd_flip_migration_target",
+        {
+            "PDFlipMigrationTargetCommitReq": object,
+            "PDFlipMigrationReqOutput": types.SimpleNamespace,
+        },
+    )
+    committed_ready = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_target_committed_mapping_ready",
+    )
+    scheduler = types.SimpleNamespace(
+        pd_flip_migration_session={
+            **session,
+            "session_id": "s",
+            "role": "target",
+        },
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=np.asarray([[1, 2, 3, 4]], dtype=np.int64)
+        ),
+        _pd_flip_target_pump_transfer=lambda session: None,
+        _pd_flip_target_commit_hicache_restore=lambda decode_req: None,
+        _pd_flip_abort_target_session=lambda session, message: session.update(
+            state="target_aborted", last_error=message
+        ),
+        _pd_flip_migration_status_dict=lambda: {},
+        _pd_flip_note_timing=lambda *args: None,
+    )
+    scheduler._pd_flip_invalid_kv_positions = types.MethodType(
+        _load_class_method(
+            SCHEDULER_PATH, "Scheduler", "_pd_flip_invalid_kv_positions"
+        ),
+        scheduler,
+    )
+    scheduler._pd_flip_target_committed_mapping_ready = types.MethodType(
+        committed_ready, scheduler
+    )
+
+    out = commit(
+        scheduler,
+        types.SimpleNamespace(session_id="s", rids=["req"]),
+    )
+
+    assert out.success
+    assert entry["phase"] == "ready_to_activate"
+    assert scheduler.pd_flip_migration_session["state"] == "ready_to_activate"
 
 
 @pytest.mark.parametrize(

@@ -4937,6 +4937,7 @@ class Scheduler(
         decode_req.metadata_buffer_index = metadata_index
 
         committed_len = int(req.kv_committed_len)
+        entry["target_committed_len"] = committed_len
         prefix_match = None
         prefix_indices = None
         prefix_len = 0
@@ -4986,7 +4987,6 @@ class Scheduler(
             entry.update(
                 mooncake_hit_len=total_prefix_len,
                 target_prompt_len=prompt_len,
-                target_committed_len=committed_len,
                 target_received_suffix_start=total_prefix_len,
                 target_received_suffix_end=committed_len,
                 stitch_mode=stitch_mode,
@@ -4995,7 +4995,6 @@ class Scheduler(
             entry.update(
                 mooncake_hit_len=0,
                 target_prompt_len=len(req.origin_input_ids),
-                target_committed_len=committed_len,
                 target_received_suffix_start=0,
                 target_received_suffix_end=committed_len,
                 stitch_mode="source_decode_full_fallback",
