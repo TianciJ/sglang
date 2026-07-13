@@ -4686,6 +4686,19 @@ class Scheduler(
             f"migration target HiCache restore returned invalid status {status_value!r}"
         )
 
+    def _pd_flip_invalid_kv_positions(self, kv_indices) -> List[int]:
+        index_values = kv_indices
+        if hasattr(index_values, "detach"):
+            index_values = index_values.detach()
+        if hasattr(index_values, "cpu"):
+            index_values = index_values.cpu()
+        index_values = index_values.tolist()
+        return [
+            index
+            for index, value in enumerate(index_values)
+            if int(value) <= 0
+        ]
+
     def _pd_flip_target_stitch_ready(self, entry: Dict[str, Any]) -> bool:
         if not getattr(
             getattr(self, "server_args", None),
@@ -4715,29 +4728,102 @@ class Scheduler(
                 f"expected=[{hit_len},{committed_len})"
             )
         req = entry["decode_req"].req
-        kv_indices = self.req_to_token_pool.req_to_token[
+        formal_kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, :committed_len
         ]
-        invalid_mask = kv_indices <= 0
-        if bool(invalid_mask.any().item()):
-            invalid_count = int(invalid_mask.sum().item())
-            index_values = (
-                kv_indices.detach().cpu().tolist()
-                if hasattr(kv_indices, "detach")
-                else kv_indices.tolist()
+        if hit_len == 0:
+            actual_source_len = len(formal_kv_indices)
+            if actual_source_len != committed_len:
+                raise RuntimeError(
+                    "migration target source fallback coverage failed: "
+                    f"formal mapping length mismatch: "
+                    f"expected={committed_len}, actual={actual_source_len}"
+                )
+            invalid_positions = self._pd_flip_invalid_kv_positions(
+                formal_kv_indices
             )
-            invalid_positions = [
-                index
-                for index, value in enumerate(index_values)
-                if int(value) <= 0
-            ]
+            if invalid_positions:
+                entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
+                raise RuntimeError(
+                    "migration target source fallback coverage failed: "
+                    f"{len(invalid_positions)} uninitialized KV indices "
+                    f"for rid={req.rid}, positions={invalid_positions[:16]}"
+                )
+            return True
+
+        decode_req = entry["decode_req"]
+        prefix_match = getattr(decode_req, "prefix_match", None)
+        try:
+            l1_prefix_len = int(prefix_match.l1_prefix_len)
+            prefix_indices = prefix_match.prefix_indices
+            actual_l1_len = len(prefix_indices)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                "L1 staged coverage is missing or invalid"
+            ) from exc
+        if not 0 <= l1_prefix_len <= hit_len or actual_l1_len != l1_prefix_len:
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                f"L1 staged coverage length mismatch: "
+                f"expected={l1_prefix_len}, actual={actual_l1_len}"
+            )
+        invalid_positions = self._pd_flip_invalid_kv_positions(prefix_indices)
+        if invalid_positions:
             entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
             raise RuntimeError(
                 "migration target HiCache restore failed: "
-                f"{invalid_count} uninitialized KV indices remain after stitch "
+                f"{len(invalid_positions)} uninitialized L1 KV indices "
                 f"for rid={req.rid}, positions={invalid_positions[:16]}"
             )
-        prefix_match = getattr(entry["decode_req"], "prefix_match", None)
+
+        restored_indices = getattr(decode_req, "hicache_restored_kv_indices", None)
+        expected_restored_len = hit_len - l1_prefix_len
+        try:
+            actual_restored_len = len(restored_indices)
+        except TypeError as exc:
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                "restored staged coverage is missing or invalid"
+            ) from exc
+        if actual_restored_len != expected_restored_len:
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                f"restored staged coverage length mismatch: "
+                f"expected={expected_restored_len}, actual={actual_restored_len}"
+            )
+        invalid_positions = [
+            l1_prefix_len + position
+            for position in self._pd_flip_invalid_kv_positions(restored_indices)
+        ]
+        if invalid_positions:
+            entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                f"{len(invalid_positions)} uninitialized restored KV indices "
+                f"for rid={req.rid}, positions={invalid_positions[:16]}"
+            )
+
+        suffix_indices = formal_kv_indices[hit_len:committed_len]
+        expected_suffix_len = committed_len - hit_len
+        actual_suffix_len = len(suffix_indices)
+        if actual_suffix_len != expected_suffix_len:
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                f"source suffix mapping length mismatch: "
+                f"expected={expected_suffix_len}, actual={actual_suffix_len}"
+            )
+        invalid_positions = [
+            hit_len + position
+            for position in self._pd_flip_invalid_kv_positions(suffix_indices)
+        ]
+        if invalid_positions:
+            entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                f"{len(invalid_positions)} uninitialized source suffix KV indices "
+                f"for rid={req.rid}, positions={invalid_positions[:16]}"
+            )
         if prefix_match is None or not getattr(
             prefix_match, "needs_local_restore", False
         ):

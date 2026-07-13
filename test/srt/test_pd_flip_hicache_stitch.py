@@ -2,7 +2,7 @@ import ast
 import pathlib
 import textwrap
 import types
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pytest
@@ -31,7 +31,7 @@ def _load_class_method(path, class_name, method_name, extra_namespace=None):
     )
     if method is None:
         raise AttributeError(f"{class_name} has no method {method_name}")
-    namespace = {"Any": Any, "Dict": Dict, "Tuple": Tuple}
+    namespace = {"Any": Any, "Dict": Dict, "List": List, "Tuple": Tuple}
     namespace.update(extra_namespace or {})
     exec(textwrap.dedent(ast.get_source_segment(source, method)), namespace)
     return namespace[method_name]
@@ -304,6 +304,9 @@ def _target_stitch_ready(entry, *, enabled=True, kv_indices=None):
     method = _load_class_method(
         SCHEDULER_PATH, "Scheduler", "_pd_flip_target_stitch_ready"
     )
+    invalid_positions = _load_class_method(
+        SCHEDULER_PATH, "Scheduler", "_pd_flip_invalid_kv_positions"
+    )
     committed_len = int(entry.get("target_committed_len", 0) or 0)
     if kv_indices is None:
         kv_indices = np.arange(1, committed_len + 1, dtype=np.int64)
@@ -313,15 +316,25 @@ def _target_stitch_ready(entry, *, enabled=True, kv_indices=None):
             req_to_token=np.asarray([kv_indices], dtype=np.int64)
         ),
     )
+    scheduler._pd_flip_invalid_kv_positions = types.MethodType(
+        invalid_positions, scheduler
+    )
     return method(scheduler, entry)
 
 
-def _target_entry(*, h=32, p=64, c0=100, start=32, end=100, restore="ready"):
-    prefix_match = types.SimpleNamespace(needs_local_restore=h > 0)
+def _target_entry(
+    *, h=32, p=64, c0=100, l1=5, start=32, end=100, restore="ready"
+):
+    prefix_match = types.SimpleNamespace(
+        needs_local_restore=h > 0,
+        l1_prefix_len=l1,
+        prefix_indices=np.arange(1, l1 + 1, dtype=np.int64),
+    )
     decode_req = types.SimpleNamespace(
         req=types.SimpleNamespace(req_pool_idx=0, rid="req"),
         prefix_match=prefix_match,
         hicache_restore_status=types.SimpleNamespace(value=restore),
+        hicache_restored_kv_indices=np.arange(1, h - l1 + 1, dtype=np.int64),
     )
     return {
         "decode_req": decode_req,
@@ -357,16 +370,83 @@ def test_target_stitch_completion_requires_hicache_restore_ready():
         _target_stitch_ready(_target_entry(restore="failed"))
 
 
-def test_target_stitch_completion_rejects_uninitialized_kv_holes():
+def test_target_stitch_completion_rejects_uninitialized_suffix_kv_holes():
     kv_indices = np.arange(1, 101, dtype=np.int64)
-    kv_indices[31] = 0
+    kv_indices[40] = 0
 
-    with pytest.raises(RuntimeError, match=r"positions=\[31\]"):
+    with pytest.raises(RuntimeError, match=r"positions=\[40\]"):
         _target_stitch_ready(_target_entry(), kv_indices=kv_indices)
 
 
+def test_target_stitch_prepare_accepts_deferred_formal_restore_mapping():
+    kv_indices = np.arange(1, 101, dtype=np.int64)
+    kv_indices[5:32] = 0
+
+    assert _target_stitch_ready(
+        _target_entry(h=32, c0=100, l1=5), kv_indices=kv_indices
+    )
+
+
+def test_target_stitch_completion_rejects_wrong_restored_length():
+    entry = _target_entry(h=32, c0=100, l1=5)
+    entry["decode_req"].hicache_restored_kv_indices = np.arange(
+        1, 27, dtype=np.int64
+    )
+
+    with pytest.raises(RuntimeError, match=r"expected=27, actual=26"):
+        _target_stitch_ready(entry)
+
+
+def test_target_stitch_completion_reports_absolute_restored_kv_holes():
+    entry = _target_entry(h=32, c0=100, l1=5)
+    entry["decode_req"].hicache_restored_kv_indices[0] = 0
+
+    with pytest.raises(RuntimeError, match=r"positions=\[5\]"):
+        _target_stitch_ready(entry)
+
+
+def test_target_full_fallback_rejects_uninitialized_source_kv_holes():
+    kv_indices = np.arange(1, 101, dtype=np.int64)
+    kv_indices[8] = 0
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"migration target source fallback coverage failed.*positions=\[8\]",
+    ):
+        _target_stitch_ready(
+            _target_entry(h=0, l1=0, start=0, restore="pending"),
+            kv_indices=kv_indices,
+        )
+
+
+@pytest.mark.parametrize(
+    "entry,expected",
+    [
+        (_target_entry(h=32, c0=100, l1=5), r"expected=68, actual=58"),
+        (
+            _target_entry(h=0, c0=100, l1=0, start=0, restore="pending"),
+            r"expected=100, actual=90",
+        ),
+    ],
+)
+def test_target_stitch_completion_rejects_truncated_formal_mapping(entry, expected):
+    kv_indices = np.arange(1, 91, dtype=np.int64)
+
+    with pytest.raises(RuntimeError, match=expected):
+        _target_stitch_ready(entry, kv_indices=kv_indices)
+
+
+def test_invalid_kv_positions_supports_numpy_and_torch_like_tensors():
+    invalid_positions = _load_class_method(
+        SCHEDULER_PATH, "Scheduler", "_pd_flip_invalid_kv_positions"
+    )
+
+    assert invalid_positions(object(), np.asarray([1, 0, -2, 3])) == [1, 2]
+    assert invalid_positions(object(), ArrayTensor([0, 4, -1])) == [0, 2]
+
+
 def test_target_full_fallback_does_not_require_hicache_restore():
-    entry = _target_entry(h=0, start=0, restore="pending")
+    entry = _target_entry(h=0, l1=0, start=0, restore="pending")
     entry["decode_req"].prefix_match.needs_local_restore = False
 
     assert _target_stitch_ready(entry)
@@ -398,6 +478,9 @@ def _pump_target_entry(entry, *, processor="none"):
     stitch_ready = _load_class_method(
         SCHEDULER_PATH, "Scheduler", "_pd_flip_target_stitch_ready"
     )
+    invalid_positions = _load_class_method(
+        SCHEDULER_PATH, "Scheduler", "_pd_flip_invalid_kv_positions"
+    )
     events = []
     scheduler = types.SimpleNamespace(
         server_args=types.SimpleNamespace(enable_pd_flip_hicache_stitch=True),
@@ -416,6 +499,9 @@ def _pump_target_entry(entry, *, processor="none"):
     )
     scheduler._pd_flip_target_hicache_restore_pending = types.MethodType(
         restore_pending, scheduler
+    )
+    scheduler._pd_flip_invalid_kv_positions = types.MethodType(
+        invalid_positions, scheduler
     )
     scheduler._pd_flip_target_stitch_ready = types.MethodType(stitch_ready, scheduler)
     if processor == "pending":
@@ -562,6 +648,12 @@ def test_target_restore_failure_marks_only_failed_rid_for_fallback():
             "Scheduler",
             "_pd_flip_target_hicache_restore_pending",
             {"DecodeRequest": object},
+        ),
+        scheduler,
+    )
+    scheduler._pd_flip_invalid_kv_positions = types.MethodType(
+        _load_class_method(
+            SCHEDULER_PATH, "Scheduler", "_pd_flip_invalid_kv_positions"
         ),
         scheduler,
     )
