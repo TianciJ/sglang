@@ -4714,6 +4714,29 @@ class Scheduler(
                 f"received=[{suffix_start},{suffix_end}), "
                 f"expected=[{hit_len},{committed_len})"
             )
+        req = entry["decode_req"].req
+        kv_indices = self.req_to_token_pool.req_to_token[
+            req.req_pool_idx, :committed_len
+        ]
+        invalid_mask = kv_indices <= 0
+        if bool(invalid_mask.any().item()):
+            invalid_count = int(invalid_mask.sum().item())
+            index_values = (
+                kv_indices.detach().cpu().tolist()
+                if hasattr(kv_indices, "detach")
+                else kv_indices.tolist()
+            )
+            invalid_positions = [
+                index
+                for index, value in enumerate(index_values)
+                if int(value) <= 0
+            ]
+            entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
+            raise RuntimeError(
+                "migration target HiCache restore failed: "
+                f"{invalid_count} uninitialized KV indices remain after stitch "
+                f"for rid={req.rid}, positions={invalid_positions[:16]}"
+            )
         prefix_match = getattr(entry["decode_req"], "prefix_match", None)
         if prefix_match is None or not getattr(
             prefix_match, "needs_local_restore", False
@@ -4853,7 +4876,10 @@ class Scheduler(
 
         if prefix_indices is None:
             dst_kv_indices = queue._pre_alloc(
-                req, prefix_len=prefix_len, total_prefix_len=total_prefix_len
+                req,
+                prefix_len=prefix_len,
+                total_prefix_len=total_prefix_len,
+                fill_len_override=committed_len,
             )
         else:
             dst_kv_indices = queue._pre_alloc(
@@ -4861,6 +4887,7 @@ class Scheduler(
                 prefix_indices=prefix_indices,
                 prefix_len=prefix_len,
                 total_prefix_len=total_prefix_len,
+                fill_len_override=committed_len,
             )
         req.cache_protected_len = total_prefix_len
         if prefix_match is not None and getattr(self, "enable_decode_hicache", False):

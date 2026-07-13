@@ -1256,6 +1256,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         prefix_indices: Optional[torch.Tensor] = None,
         prefix_len: Optional[int] = None,
         total_prefix_len: Optional[int] = None,
+        fill_len_override: Optional[int] = None,
     ) -> torch.Tensor:
         """Pre-allocate the memory for req_to_token and token_kv_pool.
 
@@ -1263,7 +1264,8 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         backed by ``prefix_indices``). ``total_prefix_len`` is the full
         prefix committed to prefill as ``decode_prefix_len`` (L1 + L2 + L3);
         the ``[prefix_len, total_prefix_len)`` gap is filled later by HiCache
-        loadback.
+        loadback. ``fill_len_override`` preserves an authoritative migration
+        snapshot boundary when output_ids trails committed KV by one token.
         """
         if prefix_len is None:
             prefix_len = 0
@@ -1276,7 +1278,11 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
             req_pool_indices is not None
         ), "req_pool_indices is full! There is a bug in memory estimation."
 
-        fill_len = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+        fill_len = (
+            int(fill_len_override)
+            if fill_len_override is not None
+            else len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+        )
         req.kv_allocated_len = fill_len
         req.kv_committed_len = fill_len
 

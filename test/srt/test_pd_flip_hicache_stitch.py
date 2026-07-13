@@ -300,12 +300,18 @@ def test_source_stitch_uses_page_range_but_keeps_state_at_logical_c0():
     assert state_committed_lens == [10]
 
 
-def _target_stitch_ready(entry, *, enabled=True):
+def _target_stitch_ready(entry, *, enabled=True, kv_indices=None):
     method = _load_class_method(
         SCHEDULER_PATH, "Scheduler", "_pd_flip_target_stitch_ready"
     )
+    committed_len = int(entry.get("target_committed_len", 0) or 0)
+    if kv_indices is None:
+        kv_indices = np.arange(1, committed_len + 1, dtype=np.int64)
     scheduler = types.SimpleNamespace(
-        server_args=types.SimpleNamespace(enable_pd_flip_hicache_stitch=enabled)
+        server_args=types.SimpleNamespace(enable_pd_flip_hicache_stitch=enabled),
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=np.asarray([kv_indices], dtype=np.int64)
+        ),
     )
     return method(scheduler, entry)
 
@@ -313,6 +319,7 @@ def _target_stitch_ready(entry, *, enabled=True):
 def _target_entry(*, h=32, p=64, c0=100, start=32, end=100, restore="ready"):
     prefix_match = types.SimpleNamespace(needs_local_restore=h > 0)
     decode_req = types.SimpleNamespace(
+        req=types.SimpleNamespace(req_pool_idx=0, rid="req"),
         prefix_match=prefix_match,
         hicache_restore_status=types.SimpleNamespace(value=restore),
     )
@@ -348,6 +355,14 @@ def test_target_stitch_completion_requires_hicache_restore_ready():
         _target_stitch_ready(_target_entry(restore="pending"))
     with pytest.raises(RuntimeError):
         _target_stitch_ready(_target_entry(restore="failed"))
+
+
+def test_target_stitch_completion_rejects_uninitialized_kv_holes():
+    kv_indices = np.arange(1, 101, dtype=np.int64)
+    kv_indices[31] = 0
+
+    with pytest.raises(RuntimeError, match=r"positions=\[31\]"):
+        _target_stitch_ready(_target_entry(), kv_indices=kv_indices)
 
 
 def test_target_full_fallback_does_not_require_hicache_restore():
@@ -387,6 +402,9 @@ def _pump_target_entry(entry, *, processor="none"):
     scheduler = types.SimpleNamespace(
         server_args=types.SimpleNamespace(enable_pd_flip_hicache_stitch=True),
         enable_decode_hicache=True,
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=np.arange(1, 101, dtype=np.int64).reshape(1, 100)
+        ),
         _pd_flip_target_metadata_ready=lambda entry: True,
         _pd_flip_target_commit_hicache_restore=lambda decode_req: events.append(
             "commit"
@@ -525,6 +543,9 @@ def test_target_restore_failure_marks_only_failed_rid_for_fallback():
     scheduler = types.SimpleNamespace(
         server_args=types.SimpleNamespace(enable_pd_flip_hicache_stitch=True),
         enable_decode_hicache=True,
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=np.arange(1, 101, dtype=np.int64).reshape(1, 100)
+        ),
         disagg_decode_transfer_queue=types.SimpleNamespace(
             _process_hicache_local_restores=lambda decode_reqs: None
         ),
@@ -919,6 +940,7 @@ def test_target_metadata_advertises_bounded_prefix_and_complete_suffix():
             return self.match
 
         def _pre_alloc(self, req, **kwargs):
+            self.prealloc_kwargs = kwargs
             return np.array([80, 90, 100, 110])
 
         def _start_hicache_prefetch(self, req, prefix_match):
@@ -991,6 +1013,7 @@ def test_target_metadata_advertises_bounded_prefix_and_complete_suffix():
     method(scheduler, entry)
 
     assert receiver.sent == ([1, 2], 6)
+    assert queue.prealloc_kwargs["fill_len_override"] == 10
     assert queue.prefetched == 6
     assert state_committed_lens == [10]
     assert entry["mooncake_hit_len"] == 6
