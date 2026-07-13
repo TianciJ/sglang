@@ -4779,23 +4779,30 @@ class Scheduler(
 
         restored_indices = getattr(decode_req, "hicache_restored_kv_indices", None)
         expected_restored_len = hit_len - l1_prefix_len
-        try:
-            actual_restored_len = len(restored_indices)
-        except TypeError as exc:
-            raise RuntimeError(
-                "migration target HiCache restore failed: "
-                "restored staged coverage is missing or invalid"
-            ) from exc
+        if expected_restored_len == 0 and restored_indices is None:
+            actual_restored_len = 0
+        else:
+            try:
+                actual_restored_len = len(restored_indices)
+            except TypeError as exc:
+                raise RuntimeError(
+                    "migration target HiCache restore failed: "
+                    "restored staged coverage is missing or invalid"
+                ) from exc
         if actual_restored_len != expected_restored_len:
             raise RuntimeError(
                 "migration target HiCache restore failed: "
                 f"restored staged coverage length mismatch: "
                 f"expected={expected_restored_len}, actual={actual_restored_len}"
             )
-        invalid_positions = [
-            l1_prefix_len + position
-            for position in self._pd_flip_invalid_kv_positions(restored_indices)
-        ]
+        invalid_positions = (
+            []
+            if expected_restored_len == 0
+            else [
+                l1_prefix_len + position
+                for position in self._pd_flip_invalid_kv_positions(restored_indices)
+            ]
+        )
         if invalid_positions:
             entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
             raise RuntimeError(

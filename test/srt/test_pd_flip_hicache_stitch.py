@@ -326,7 +326,7 @@ def _target_entry(
     *, h=32, p=64, c0=100, l1=5, start=32, end=100, restore="ready"
 ):
     prefix_match = types.SimpleNamespace(
-        needs_local_restore=h > 0,
+        needs_local_restore=h > l1,
         l1_prefix_len=l1,
         prefix_indices=np.arange(1, l1 + 1, dtype=np.int64),
     )
@@ -387,6 +387,13 @@ def test_target_stitch_prepare_accepts_deferred_formal_restore_mapping():
     )
 
 
+def test_target_stitch_prepare_accepts_complete_l1_without_restore_indices():
+    entry = _target_entry(h=5, c0=100, l1=5, start=5)
+    entry["decode_req"].hicache_restored_kv_indices = None
+
+    assert _target_stitch_ready(entry)
+
+
 def test_target_stitch_completion_rejects_wrong_restored_length():
     entry = _target_entry(h=32, c0=100, l1=5)
     entry["decode_req"].hicache_restored_kv_indices = np.arange(
@@ -394,6 +401,16 @@ def test_target_stitch_completion_rejects_wrong_restored_length():
     )
 
     with pytest.raises(RuntimeError, match=r"expected=27, actual=26"):
+        _target_stitch_ready(entry)
+
+
+def test_target_stitch_completion_rejects_missing_required_restore_indices():
+    entry = _target_entry(h=32, c0=100, l1=5)
+    entry["decode_req"].hicache_restored_kv_indices = None
+
+    with pytest.raises(
+        RuntimeError, match=r"restored staged coverage is missing or invalid"
+    ):
         _target_stitch_ready(entry)
 
 
