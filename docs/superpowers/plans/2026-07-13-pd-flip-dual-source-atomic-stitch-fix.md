@@ -347,7 +347,7 @@ git add docs/superpowers/plans/2026-07-13-pd-flip-dual-source-atomic-stitch-fix.
 git commit -m "docs(pd-flip): record dual-source stitch implementation"
 ```
 
-- [ ] **Step 5: Push tested `main` to the fork**
+- [x] **Step 5: Push tested `main` to the fork**
 
 ```powershell
 git push origin main
