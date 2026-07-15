@@ -2007,6 +2007,14 @@ class Scheduler(
                 message=f"source migration requires decode role, got {role}",
                 status=self._pd_flip_migration_status_dict(),
             )
+        if recv_req.prefill_donor_mode and not getattr(
+            self.server_args, "enable_pd_flip_prefill_donor", False
+        ):
+            return PDFlipMigrationReqOutput(
+                success=False,
+                message="prefill donor migration is not enabled on source",
+                status=self._pd_flip_migration_status_dict(),
+            )
 
         waiting_scan_started = time.monotonic()
         waiting_reqs = list(getattr(self, "waiting_queue", []))
@@ -2070,6 +2078,8 @@ class Scheduler(
                     8998,
                 )
             )
+            if recv_req.prefill_donor_mode:
+                self._pd_flip_apply_prefill_donor_manifest(req, manifest)
             manifests.append(manifest)
             migration_reqs.append(req)
         timing_debug["running_manifest_count"] = len(manifests)
@@ -2089,6 +2099,8 @@ class Scheduler(
                     8998,
                 )
             )
+            if recv_req.prefill_donor_mode:
+                self._pd_flip_apply_prefill_donor_manifest(req, manifest)
             manifests.append(manifest)
             migration_reqs.append(req)
             source_waiting_reqs.append(
@@ -2124,6 +2136,7 @@ class Scheduler(
             "source_entries": real_entries,
             "source_waiting_reqs": source_waiting_reqs,
             "timing_debug": timing_debug,
+            "prefill_donor_mode": bool(recv_req.prefill_donor_mode),
         }
         self.pd_flip_migration_session = session
         if real_entries:
@@ -2177,6 +2190,14 @@ class Scheduler(
                 message=f"target migration requires decode role, got {role}",
                 status=self._pd_flip_migration_status_dict(),
             )
+        if recv_req.prefill_donor_mode and not getattr(
+            self.server_args, "enable_pd_flip_prefill_donor", False
+        ):
+            return PDFlipMigrationReqOutput(
+                success=False,
+                message="prefill donor migration is not enabled on target",
+                status=self._pd_flip_migration_status_dict(),
+            )
 
         session_id = recv_req.session_id or f"pd-flip-target-{int(time.time() * 1000)}"
         manifests = list(recv_req.manifests or [])
@@ -2216,6 +2237,7 @@ class Scheduler(
             "held_reqs": 0,
             "target_entries": target_entries,
             "timing_debug": timing_debug,
+            "prefill_donor_mode": bool(recv_req.prefill_donor_mode),
         }
         if target_entries:
             self._pd_flip_target_pump_transfer(self.pd_flip_migration_session)
@@ -3091,6 +3113,11 @@ class Scheduler(
             1, int(delta_index)
         )
 
+    def _pd_flip_prefill_donor_room_for_req(self, req: Req) -> int:
+        server_args = getattr(self, "server_args", None)
+        dp_size = max(1, int(getattr(server_args, "dp_size", 1)))
+        return self._pd_flip_migration_room_for_req(req) + dp_size * (1 << 30)
+
     def _pd_flip_delta_page_start(self, committed_len: int) -> int:
         page_size = int(getattr(self.token_to_kv_pool_allocator, "page_size", 1) or 1)
         return (max(0, int(committed_len)) // page_size) * page_size
@@ -3107,6 +3134,28 @@ class Scheduler(
         if hit_len == page_aligned_prompt:
             return hit_len, "full_prefix_stitch"
         return hit_len, "partial_prefix_stitch"
+
+    @staticmethod
+    def _pd_flip_prefill_donor_boundary(prompt_len: int, page_size: int) -> int:
+        page_size = max(1, int(page_size))
+        return (max(0, int(prompt_len)) // page_size) * page_size
+
+    def _pd_flip_apply_prefill_donor_manifest(
+        self, req: Req, manifest: Dict[str, Any]
+    ) -> None:
+        prompt_len = len(getattr(req, "origin_input_ids", []) or [])
+        page_size = int(self.token_to_kv_pool_allocator.page_size)
+        donor_end = self._pd_flip_prefill_donor_boundary(prompt_len, page_size)
+        manifest.update(
+            prefill_donor_host=getattr(req, "bootstrap_host", None),
+            prefill_donor_port=getattr(req, "bootstrap_port", None),
+            prompt_len=prompt_len,
+            prefill_donor_end=donor_end,
+            source_decode_start=donor_end,
+            prefill_donor_bootstrap_room=self._pd_flip_prefill_donor_room_for_req(
+                req
+            ),
+        )
 
     def _pd_flip_source_page_indices_range(
         self, req: Req, start_len: int, end_len: int

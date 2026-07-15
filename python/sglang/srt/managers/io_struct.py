@@ -1745,6 +1745,7 @@ class PDFlipMigrationSourceStartReq(BaseReq):
     target_url: Optional[str] = None
     rids: Optional[List[str]] = None
     include_waiting: bool = False
+    prefill_donor_mode: bool = False
 
 
 @dataclass
@@ -1755,6 +1756,7 @@ class PDFlipMigrationTargetPrepareReq(BaseReq):
     adopt_on_success: bool = False
     prepare_only: bool = False
     adopt_on_commit: bool = True
+    prefill_donor_mode: bool = False
 
 
 @dataclass

@@ -872,6 +872,7 @@ class ServerArgs:
     optimistic_prefill_retries: int = 0
     enable_pd_flip_state_machine: bool = False
     enable_pd_flip_hicache_stitch: bool = False
+    enable_pd_flip_prefill_donor: bool = False
     pd_flip_window_seconds: float = 1.0
     pd_flip_slo_threshold: float = 0.9
     pd_flip_prefill_nodes: Optional[int] = None
@@ -1088,6 +1089,7 @@ class ServerArgs:
         # Validate cache settings.
         self._handle_cache_compatibility()
         self._validate_pd_flip_hicache_stitch()
+        self._validate_pd_flip_prefill_donor()
 
         # Handle diffusion LLM inference.
         self._handle_dllm_inference()
@@ -4463,6 +4465,15 @@ class ServerArgs:
                 "--hicache-storage-backend"
             )
 
+    def _validate_pd_flip_prefill_donor(self):
+        if not self.enable_pd_flip_prefill_donor:
+            return
+        if not self.enable_pd_flip_hicache_stitch:
+            raise ValueError(
+                "--enable-pd-flip-prefill-donor requires "
+                "--enable-pd-flip-hicache-stitch"
+            )
+
     def _handle_deterministic_inference(self):
         if self.rl_on_policy_target is not None:
             logger.warning(
@@ -7471,6 +7482,12 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_pd_flip_hicache_stitch,
             help="Stitch a target HiCache prefix with the source decode KV suffix during PD flip migration.",
+        )
+        parser.add_argument(
+            "--enable-pd-flip-prefill-donor",
+            action="store_true",
+            default=ServerArgs.enable_pd_flip_prefill_donor,
+            help="Use the request's original prefill worker as the donor for complete prompt pages during PD flip migration.",
         )
         parser.add_argument(
             "--enable-pd-runtime-role-switch",
