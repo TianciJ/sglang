@@ -2216,7 +2216,9 @@ class Scheduler(
         timing_debug = {"manifest_count": len(manifests)}
         entry_started = time.monotonic()
         target_entries, real_error = self._pd_flip_prepare_target_entries(
-            manifests, recv_req.source_url
+            manifests,
+            recv_req.source_url,
+            prefill_donor_mode=bool(recv_req.prefill_donor_mode),
         )
         timing_debug["prepare_target_entries_s"] = time.monotonic() - entry_started
         self.pd_flip_migration_session = {
@@ -4117,8 +4119,65 @@ class Scheduler(
             entry["final_owner"] = "target"
             self._pd_flip_free_source_metadata(entry)
 
+    def _pd_flip_prepare_target_donor_entry(
+        self,
+        manifest: Dict[str, Any],
+        source_host: str,
+        receiver_class,
+        kv_manager,
+    ) -> Dict[str, Any]:
+        req = self._pd_flip_manifest_to_req(manifest, source_host)
+        receiver = receiver_class(
+            mgr=kv_manager,
+            bootstrap_addr=f"{req.bootstrap_host}:{req.bootstrap_port}",
+            bootstrap_room=req.bootstrap_room,
+        )
+        decode_req = DecodeRequest(req=req, kv_receiver=receiver)
+
+        donor_end = int(manifest.get("prefill_donor_end") or 0)
+        prefill_decode_req = None
+        if donor_end > 0:
+            donor_host = str(manifest.get("prefill_donor_host") or "").strip()
+            donor_port = int(manifest.get("prefill_donor_port") or 0)
+            donor_room = int(manifest.get("prefill_donor_bootstrap_room") or 0)
+            if not donor_host or donor_port <= 0 or donor_room <= 0:
+                raise RuntimeError(
+                    "prefill donor manifest is missing bootstrap identity"
+                )
+            donor_manifest = dict(manifest)
+            donor_manifest.update(
+                source_bootstrap_port=donor_port,
+                migration_bootstrap_room=donor_room,
+                kv_committed_len=donor_end,
+            )
+            donor_req = self._pd_flip_manifest_to_req(donor_manifest, donor_host)
+            donor_receiver = receiver_class(
+                mgr=kv_manager,
+                bootstrap_addr=(
+                    f"{donor_req.bootstrap_host}:{donor_req.bootstrap_port}"
+                ),
+                bootstrap_room=donor_req.bootstrap_room,
+            )
+            prefill_decode_req = DecodeRequest(
+                req=donor_req, kv_receiver=donor_receiver
+            )
+
+        return {
+            "decode_req": decode_req,
+            "prefill_decode_req": prefill_decode_req,
+            "phase": "new",
+            "manifest": manifest,
+            "source_queue": manifest.get("pd_flip_source_queue", "running"),
+            "metadata_index": -1,
+            "prefill_metadata_index": -1,
+            "timing_debug": {},
+        }
+
     def _pd_flip_prepare_target_entries(
-        self, manifests: List[Dict[str, Any]], source_url: Optional[str]
+        self,
+        manifests: List[Dict[str, Any]],
+        source_url: Optional[str],
+        prefill_donor_mode: bool = False,
     ) -> Tuple[Dict[str, Dict[str, Any]], str]:
         if not self._pd_flip_can_use_real_migration():
             return {}, ""
@@ -4132,25 +4191,39 @@ class Scheduler(
             for manifest in manifests:
                 entry_started = time.monotonic()
                 timing_debug = {}
-                req_started = time.monotonic()
-                req = self._pd_flip_manifest_to_req(manifest, source_host)
-                timing_debug["manifest_to_req_s"] = time.monotonic() - req_started
-                receiver_started = time.monotonic()
-                receiver = receiver_class(
-                    mgr=kv_manager,
-                    bootstrap_addr=f"{req.bootstrap_host}:{req.bootstrap_port}",
-                    bootstrap_room=req.bootstrap_room,
-                )
-                timing_debug["receiver_create_s"] = time.monotonic() - receiver_started
-                decode_req = DecodeRequest(req=req, kv_receiver=receiver)
-                entries[req.rid] = {
-                    "decode_req": decode_req,
-                    "phase": "new",
-                    "manifest": manifest,
-                    "source_queue": manifest.get("pd_flip_source_queue", "running"),
-                    "metadata_index": -1,
-                    "timing_debug": timing_debug,
-                }
+                if prefill_donor_mode:
+                    entry = self._pd_flip_prepare_target_donor_entry(
+                        manifest, source_host, receiver_class, kv_manager
+                    )
+                    req = entry["decode_req"].req
+                    entry["timing_debug"] = timing_debug
+                else:
+                    req_started = time.monotonic()
+                    req = self._pd_flip_manifest_to_req(manifest, source_host)
+                    timing_debug["manifest_to_req_s"] = (
+                        time.monotonic() - req_started
+                    )
+                    receiver_started = time.monotonic()
+                    receiver = receiver_class(
+                        mgr=kv_manager,
+                        bootstrap_addr=f"{req.bootstrap_host}:{req.bootstrap_port}",
+                        bootstrap_room=req.bootstrap_room,
+                    )
+                    timing_debug["receiver_create_s"] = (
+                        time.monotonic() - receiver_started
+                    )
+                    decode_req = DecodeRequest(req=req, kv_receiver=receiver)
+                    entry = {
+                        "decode_req": decode_req,
+                        "phase": "new",
+                        "manifest": manifest,
+                        "source_queue": manifest.get(
+                            "pd_flip_source_queue", "running"
+                        ),
+                        "metadata_index": -1,
+                        "timing_debug": timing_debug,
+                    }
+                entries[req.rid] = entry
                 timing_debug["target_entry_prepare_total_s"] = (
                     time.monotonic() - entry_started
                 )
@@ -4567,7 +4640,135 @@ class Scheduler(
         elif session["pending_reqs"] == 0 and not terminal:
             session["state"] = "target_delta_transferred"
 
+    def _pd_flip_target_pump_donor_transfer(
+        self, session: Dict[str, Any]
+    ) -> None:
+        entries = session.get("target_entries") or {}
+        if not entries:
+            return
+
+        transferred = set(session.get("transferred_rids", set()))
+        failed = set(session.get("failed_rids", set()))
+        for rid, entry in entries.items():
+            if rid in transferred or rid in failed:
+                continue
+            decode_req = entry["decode_req"]
+            prefill_decode_req = entry.get("prefill_decode_req")
+            try:
+                if entry.get("phase") == "new":
+                    if not self._pd_flip_target_init_receiver(decode_req):
+                        continue
+                    if prefill_decode_req is not None and not self._pd_flip_target_init_receiver(
+                        prefill_decode_req
+                    ):
+                        continue
+                    entry["phase"] = "waiting_for_input"
+                    self._pd_flip_note_timing(entry, "target_donor_waiting_for_input")
+
+                if entry.get("phase") == "waiting_for_input":
+                    source_poll = decode_req.kv_receiver.poll()
+                    prefill_poll = (
+                        prefill_decode_req.kv_receiver.poll()
+                        if prefill_decode_req is not None
+                        else KVPoll.WaitingForInput
+                    )
+                    if source_poll == KVPoll.Failed or prefill_poll == KVPoll.Failed:
+                        raise RuntimeError("migration target donor bootstrap failed")
+                    if (
+                        source_poll != KVPoll.WaitingForInput
+                        or prefill_poll != KVPoll.WaitingForInput
+                    ):
+                        continue
+                    self._pd_flip_target_prealloc_donor_ranges(entry)
+                    entry["phase"] = "transferring"
+                    self._pd_flip_note_timing(entry, "target_donor_transferring")
+
+                if entry.get("phase") == "transferring":
+                    source_poll = decode_req.kv_receiver.poll()
+                    prefill_poll = (
+                        prefill_decode_req.kv_receiver.poll()
+                        if prefill_decode_req is not None
+                        else KVPoll.Success
+                    )
+                    if source_poll == KVPoll.Failed or prefill_poll == KVPoll.Failed:
+                        raise RuntimeError("migration target donor transfer failed")
+                    if (
+                        source_poll == KVPoll.Success
+                        and prefill_poll == KVPoll.Success
+                        and self._pd_flip_target_metadata_ready_for(
+                            entry, "metadata_index", decode_req
+                        )
+                        and (
+                            prefill_decode_req is None
+                            or self._pd_flip_target_metadata_ready_for(
+                                entry,
+                                "prefill_metadata_index",
+                                prefill_decode_req,
+                            )
+                        )
+                        and self._pd_flip_target_donor_ranges_ready(entry)
+                    ):
+                        transferred.add(rid)
+                        entry["phase"] = (
+                            "transferred_held"
+                            if session.get("prepare_only", False)
+                            else "transferred"
+                        )
+                        for receiver_req in (decode_req, prefill_decode_req):
+                            if receiver_req is None:
+                                continue
+                            receiver = getattr(receiver_req, "kv_receiver", None)
+                            if receiver is not None:
+                                receiver.clear()
+                                receiver_req.kv_receiver = None
+                        if session.get("prepare_only", False):
+                            entry["held"] = True
+                            self._pd_flip_note_timing(entry, "target_held")
+                        elif session.get("adopt_on_success", False):
+                            self._pd_flip_adopt_target_request(entry)
+                        else:
+                            self._pd_flip_release_target_request(entry)
+                        self._pd_flip_free_target_metadata(entry)
+            except Exception as exc:
+                failed.add(rid)
+                entry["phase"] = "failed"
+                session["last_error"] = str(exc)
+                for receiver_req in (decode_req, prefill_decode_req):
+                    if receiver_req is None:
+                        continue
+                    receiver = getattr(receiver_req, "kv_receiver", None)
+                    if receiver is not None:
+                        receiver.abort()
+                        receiver_req.kv_receiver = None
+                self._pd_flip_release_target_request(entry)
+                self._pd_flip_free_target_metadata(entry)
+
+        session["transferred_rids"] = transferred
+        session["failed_rids"] = failed
+        session["transferred_reqs"] = len(transferred)
+        session["failed_reqs"] = len(failed)
+        session["held_reqs"] = sum(
+            1
+            for entry in entries.values()
+            if entry.get("phase") == "transferred_held" and entry.get("held")
+        )
+        session["pending_reqs"] = max(
+            0, len(session.get("manifests", [])) - len(transferred) - len(failed)
+        )
+        terminal = session.get("state") in {"active", "target_aborted"}
+        if not terminal:
+            if failed:
+                session["state"] = "target_failed"
+            elif session.get("held_reqs", 0) > 0:
+                session["state"] = "target_transferred_held"
+            elif session["pending_reqs"] == 0:
+                session["state"] = "target_transferred"
+        self._pd_flip_target_pump_delta_transfer(session)
+
     def _pd_flip_target_pump_transfer(self, session: Dict[str, Any]) -> None:
+        if session.get("prefill_donor_mode", False):
+            self._pd_flip_target_pump_donor_transfer(session)
+            return
         entries = session.get("target_entries") or {}
         if not entries:
             return
@@ -5104,6 +5305,135 @@ class Scheduler(
                 req.bootstrap_room
             )
 
+    def _pd_flip_target_prealloc_donor_ranges(
+        self, entry: Dict[str, Any]
+    ) -> None:
+        decode_req: DecodeRequest = entry["decode_req"]
+        req = decode_req.req
+        manifest = entry.get("manifest") or {}
+        prompt_len = int(manifest.get("prompt_len") or len(req.origin_input_ids))
+        donor_end = int(manifest.get("prefill_donor_end") or 0)
+        source_start = int(manifest.get("source_decode_start") or 0)
+        committed_len = int(manifest.get("kv_committed_len") or req.kv_committed_len)
+        if not 0 <= donor_end == source_start <= prompt_len <= committed_len:
+            raise RuntimeError(
+                "migration target donor boundary is invalid: "
+                f"B={donor_end}, P={prompt_len}, C0={committed_len}"
+            )
+
+        state_types = getattr(
+            getattr(self.disagg_decode_prealloc_queue.kv_manager, "kv_args", None),
+            "state_types",
+            [],
+        )
+        if state_types:
+            raise RuntimeError(
+                "prefill donor migration does not support auxiliary state types"
+            )
+
+        source_metadata_index = self.req_to_metadata_buffer_idx_allocator.alloc()
+        if source_metadata_index is None:
+            raise RuntimeError("no metadata buffer available for source donor range")
+        entry["metadata_index"] = source_metadata_index
+        decode_req.metadata_buffer_index = source_metadata_index
+
+        prefill_decode_req = entry.get("prefill_decode_req")
+        prefill_metadata_index = -1
+        if donor_end > 0:
+            if prefill_decode_req is None:
+                raise RuntimeError("missing original Prefill donor receiver")
+            prefill_metadata_index = self.req_to_metadata_buffer_idx_allocator.alloc()
+            if prefill_metadata_index is None:
+                self.req_to_metadata_buffer_idx_allocator.free(source_metadata_index)
+                entry["metadata_index"] = -1
+                raise RuntimeError(
+                    "no metadata buffer available for Prefill donor range"
+                )
+            entry["prefill_metadata_index"] = prefill_metadata_index
+            prefill_decode_req.metadata_buffer_index = prefill_metadata_index
+
+        queue = self.disagg_decode_prealloc_queue
+        queue._pre_alloc(
+            req,
+            prefix_len=0,
+            total_prefix_len=0,
+            fill_len_override=committed_len,
+        )
+        req.cache_protected_len = 0
+        page_size = int(self.token_to_kv_pool_allocator.page_size)
+        formal_indices = self.req_to_token_pool.req_to_token[
+            req.req_pool_idx, :committed_len
+        ]
+        prefill_pages = kv_to_page_indices(
+            formal_indices[:donor_end].cpu().numpy(), page_size
+        )
+        source_pages = kv_to_page_indices(
+            formal_indices[source_start:committed_len].cpu().numpy(), page_size
+        )
+        state_indices = self._pd_flip_target_state_indices(req, committed_len)
+        if donor_end > 0:
+            prefill_decode_req.kv_receiver.send_metadata(
+                prefill_pages,
+                prefill_metadata_index,
+                state_indices,
+                decode_prefix_len=0,
+            )
+        decode_req.kv_receiver.send_metadata(
+            source_pages,
+            source_metadata_index,
+            state_indices,
+            decode_prefix_len=source_start,
+        )
+        entry.update(
+            target_prefix_match_skipped=True,
+            target_prompt_len=prompt_len,
+            target_committed_len=committed_len,
+            prefill_received_start=0,
+            prefill_received_end=donor_end,
+            source_transfer_start=source_start,
+            source_transfer_end=committed_len,
+            prefill_index_size=int(getattr(prefill_pages, "size", len(prefill_pages))),
+            source_index_size=int(getattr(source_pages, "size", len(source_pages))),
+            stitch_mode="prefill_donor_pages",
+        )
+
+    def _pd_flip_target_donor_ranges_ready(self, entry: Dict[str, Any]) -> bool:
+        try:
+            donor_end = int(entry["prefill_received_end"])
+            prompt_len = int(entry["target_prompt_len"])
+            committed_len = int(entry["target_committed_len"])
+            prefill_start = int(entry["prefill_received_start"])
+            source_start = int(entry["source_transfer_start"])
+            source_end = int(entry["source_transfer_end"])
+            req = entry["decode_req"].req
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "migration target donor coverage metadata is missing or invalid"
+            ) from exc
+        if not (
+            prefill_start == 0
+            and 0 <= donor_end == source_start <= prompt_len <= committed_len
+            and source_end == committed_len
+        ):
+            raise RuntimeError(
+                "migration target donor coverage mismatch: "
+                f"prefill=[{prefill_start},{donor_end}), "
+                f"source=[{source_start},{source_end}), "
+                f"P={prompt_len}, C0={committed_len}"
+            )
+        formal_indices = self.req_to_token_pool.req_to_token[
+            req.req_pool_idx, :committed_len
+        ]
+        invalid_positions = self._pd_flip_invalid_kv_positions(formal_indices)
+        if invalid_positions:
+            entry["target_invalid_kv_position_sample"] = invalid_positions[:16]
+            raise RuntimeError(
+                "migration target donor coverage failed: "
+                f"{len(invalid_positions)} uninitialized KV indices "
+                f"for rid={req.rid}, positions={invalid_positions[:16]}"
+            )
+        return True
+
     def _pd_flip_target_state_indices(self, req: Req, committed_len: int) -> List:
         page_size = self.token_to_kv_pool_allocator.page_size
 
@@ -5150,11 +5480,16 @@ class Scheduler(
                 state_indices.append(None)
         return state_indices
 
-    def _pd_flip_target_metadata_ready(self, entry: Dict[str, Any]) -> bool:
-        metadata_index = entry.get("metadata_index", -1)
+    def _pd_flip_target_metadata_ready_for(
+        self,
+        entry: Dict[str, Any],
+        metadata_key: str,
+        decode_req,
+    ) -> bool:
+        metadata_index = entry.get(metadata_key, -1)
         if metadata_index is None or metadata_index < 0:
             return True
-        expected_room = entry["decode_req"].req.bootstrap_room
+        expected_room = decode_req.req.bootstrap_room
         actual_room = self.disagg_metadata_buffers.bootstrap_room[
             metadata_index, 0
         ].item()
@@ -5166,12 +5501,18 @@ class Scheduler(
             )
         return True
 
+    def _pd_flip_target_metadata_ready(self, entry: Dict[str, Any]) -> bool:
+        return self._pd_flip_target_metadata_ready_for(
+            entry, "metadata_index", entry["decode_req"]
+        )
+
     def _pd_flip_free_target_metadata(self, entry: Dict[str, Any]) -> None:
-        metadata_index = entry.get("metadata_index", -1)
-        if metadata_index is not None and metadata_index >= 0:
-            self.disagg_metadata_buffers.bootstrap_room[metadata_index] = 0
-            self.req_to_metadata_buffer_idx_allocator.free(metadata_index)
-            entry["metadata_index"] = -1
+        for metadata_key in ("metadata_index", "prefill_metadata_index"):
+            metadata_index = entry.get(metadata_key, -1)
+            if metadata_index is not None and metadata_index >= 0:
+                self.disagg_metadata_buffers.bootstrap_room[metadata_index] = 0
+                self.req_to_metadata_buffer_idx_allocator.free(metadata_index)
+                entry[metadata_key] = -1
 
     def _pd_flip_release_target_request(self, entry: Dict[str, Any]) -> None:
         if entry.get("request_released"):
