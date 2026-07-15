@@ -247,6 +247,50 @@ class TestPDFlipMigrationAccounting(unittest.TestCase):
 
         self.assertEqual(Scheduler._pd_flip_target_held_reqs(scheduler), [req])
 
+    def test_prefill_donor_req_is_exposed_for_invariant_accounting(self):
+        req = self._held_req()
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.pd_flip_migration_session = None
+        scheduler.pd_flip_prefill_donor_session = {
+            "entries": {
+                "rid-1": {
+                    "phase": "restoring",
+                    "cleanup_complete": False,
+                    "req": req,
+                }
+            }
+        }
+
+        held_reqs = Scheduler._pd_flip_invariant_held_reqs(scheduler)
+
+        self.assertEqual(held_reqs, [req])
+
+    def test_req_pool_check_accounts_for_prefill_donor_req(self):
+        req = self._held_req()
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.pd_flip_migration_session = None
+        scheduler.pd_flip_prefill_donor_session = {
+            "entries": {
+                "rid-1": {
+                    "phase": "restoring",
+                    "cleanup_complete": False,
+                    "req": req,
+                }
+            }
+        }
+        checker = self._checker_with_held_req(req)
+        checker.get_pd_flip_held_reqs = (
+            lambda: Scheduler._pd_flip_invariant_held_reqs(scheduler)
+        )
+        checker.req_to_token_pool.free_slots = [object()] * 2047
+
+        with patch(
+            "sglang.srt.managers.scheduler_components.invariant_checker.raise_error_or_warn"
+        ) as raise_or_warn:
+            checker._check_req_pool()
+
+        raise_or_warn.assert_not_called()
+
     def test_req_pool_check_accounts_for_target_migration_req(self):
         held_req = self._held_req()
         checker = self._checker_with_held_req(held_req)

@@ -6489,6 +6489,17 @@ class Scheduler(
                 held_reqs.append(req)
         return held_reqs
 
+    def _pd_flip_invariant_held_reqs(self) -> List[Req]:
+        held_reqs = self._pd_flip_target_held_reqs()
+        donor_session = getattr(self, "pd_flip_prefill_donor_session", None)
+        for entry in (donor_session or {}).get("entries", {}).values():
+            if entry.get("cleanup_complete"):
+                continue
+            req = entry.get("req")
+            if req is not None and getattr(req, "req_pool_idx", None) is not None:
+                held_reqs.append(req)
+        return held_reqs
+
     def init_overlap(self):
         self.device_module = torch.get_device_module(self.device)
 
@@ -7087,7 +7098,7 @@ class Scheduler(
             pool_stats_observer=self.pool_stats_observer,
             get_last_batch=lambda: self.last_batch,
             get_running_batch=lambda: self.running_batch,
-            get_pd_flip_held_reqs=self._pd_flip_target_held_reqs,
+            get_pd_flip_held_reqs=self._pd_flip_invariant_held_reqs,
         )
 
     def init_kv_events_publisher(self) -> None:
