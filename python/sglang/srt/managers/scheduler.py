@@ -157,6 +157,9 @@ from sglang.srt.managers.io_struct import (
     PDFlipMigrationTargetDeltaPrepareReq,
     PDFlipMigrationTargetFallbackPrepareReq,
     PDFlipMigrationTargetPrepareReq,
+    PDFlipPrefillDonorAbortReq,
+    PDFlipPrefillDonorStartReq,
+    PDFlipPrefillDonorStatusReq,
     PDRuntimeRoleAdmissionReq,
     PDRuntimeRoleReqOutput,
     PDRuntimeRoleSetReq,
@@ -2250,6 +2253,237 @@ class Scheduler(
             manifests=manifests,
         )
 
+    def _pd_flip_pump_prefill_donor_session(
+        self, session: Dict[str, Any]
+    ) -> None:
+        entries = session.get("entries") or {}
+        for entry in entries.values():
+            self._pd_flip_pump_prefill_donor_entry(entry)
+        transferred = {
+            rid for rid, entry in entries.items() if entry.get("phase") == "transferred"
+        }
+        failed = {
+            rid for rid, entry in entries.items() if entry.get("phase") == "failed"
+        }
+        session["transferred_rids"] = transferred
+        session["failed_rids"] = failed
+        session["transferred_reqs"] = len(transferred)
+        session["failed_reqs"] = len(failed)
+        session["pending_reqs"] = max(
+            0, len(entries) - len(transferred) - len(failed)
+        )
+        if failed:
+            session["state"] = "prefill_donor_failed"
+            first_failed = entries[next(iter(failed))]
+            session["last_error"] = first_failed.get("error", "")
+        elif session["pending_reqs"] == 0:
+            session["state"] = "prefill_donor_transferred"
+
+    def _pd_flip_prefill_donor_status_dict(self) -> Dict[str, Any]:
+        session = getattr(self, "pd_flip_prefill_donor_session", None)
+        if not session:
+            return {"state": "idle", "role": "prefill_donor"}
+        entries = session.get("entries") or {}
+        return {
+            "session_id": session.get("session_id"),
+            "role": "prefill_donor",
+            "state": session.get("state"),
+            "pending_reqs": int(session.get("pending_reqs", 0) or 0),
+            "transferred_reqs": int(session.get("transferred_reqs", 0) or 0),
+            "failed_reqs": int(session.get("failed_reqs", 0) or 0),
+            "last_error": session.get("last_error", ""),
+            "entries": {
+                rid: {
+                    key: entry.get(key)
+                    for key in (
+                        "phase",
+                        "error",
+                        "error_type",
+                        "prefill_donor_end",
+                        "prefill_donor_restore_hit_len",
+                        "expected_restore_len",
+                        "prefill_donor_transfer_start",
+                        "prefill_donor_transfer_end",
+                        "prefill_donor_pages",
+                        "prefill_donor_transfer_bytes",
+                        "prefill_donor_transfer_duration_s",
+                    )
+                    if entry.get(key) is not None
+                }
+                for rid, entry in entries.items()
+            },
+        }
+
+    def start_pd_flip_prefill_donor(
+        self, recv_req: PDFlipPrefillDonorStartReq
+    ) -> PDFlipMigrationReqOutput:
+        if not getattr(self.server_args, "enable_pd_flip_prefill_donor", False):
+            return PDFlipMigrationReqOutput(
+                False,
+                "prefill donor migration is not enabled",
+                status=self._pd_flip_prefill_donor_status_dict(),
+            )
+        session_id = recv_req.session_id or f"pd-flip-donor-{int(time.time() * 1000)}"
+        existing = getattr(self, "pd_flip_prefill_donor_session", None)
+        if existing:
+            if str(existing.get("session_id")) == str(session_id):
+                self._pd_flip_pump_prefill_donor_session(existing)
+                return PDFlipMigrationReqOutput(
+                    True,
+                    "prefill donor session already exists",
+                    status=self._pd_flip_prefill_donor_status_dict(),
+                    manifests=list(existing.get("manifests", [])),
+                )
+            if existing.get("state") not in {
+                "prefill_donor_transferred",
+                "prefill_donor_failed",
+                "prefill_donor_aborted",
+            }:
+                return PDFlipMigrationReqOutput(
+                    False,
+                    "conflicting prefill donor session already exists",
+                    status=self._pd_flip_prefill_donor_status_dict(),
+                )
+
+        manifests = list(recv_req.manifests or [])
+        if not manifests:
+            return PDFlipMigrationReqOutput(
+                False,
+                "prefill donor manifests are empty",
+                status=self._pd_flip_prefill_donor_status_dict(),
+            )
+        entries = {}
+        try:
+            kv_manager = self._pd_flip_get_source_kv_manager()
+            if getattr(getattr(kv_manager, "kv_args", None), "state_types", []):
+                raise RuntimeError(
+                    "prefill donor migration does not support auxiliary state types"
+                )
+            sender_class = get_kv_class(self.transfer_backend, KVClassType.SENDER)
+            bootstrap_addr = self._pd_flip_local_bootstrap_addr(kv_manager)
+            for manifest in manifests:
+                donor_end = int(manifest.get("prefill_donor_end") or 0)
+                rid = str(manifest.get("rid") or "")
+                if not rid:
+                    raise RuntimeError("prefill donor manifest has empty rid")
+                if donor_end == 0:
+                    entries[rid] = {
+                        "phase": "transferred",
+                        "manifest": manifest,
+                        "prefill_donor_end": 0,
+                        "prefill_donor_transfer_start": 0,
+                        "prefill_donor_transfer_end": 0,
+                    }
+                    continue
+                entries[rid] = self._pd_flip_prepare_prefill_donor_entry(
+                    manifest,
+                    sender_class,
+                    kv_manager,
+                    bootstrap_addr,
+                )
+        except Exception as exc:
+            for entry in entries.values():
+                sender = entry.get("sender")
+                if sender is not None and hasattr(sender, "abort"):
+                    sender.abort()
+                if entry.get("req") is not None:
+                    self._pd_flip_cleanup_prefill_donor_entry(entry)
+            return PDFlipMigrationReqOutput(
+                False,
+                str(exc),
+                status={
+                    "session_id": session_id,
+                    "role": "prefill_donor",
+                    "state": "prefill_donor_failed",
+                    "last_error": str(exc),
+                },
+                manifests=manifests,
+            )
+
+        self.pd_flip_prefill_donor_session = {
+            "session_id": session_id,
+            "state": "prefill_donor_started",
+            "manifests": manifests,
+            "entries": entries,
+            "pending_reqs": len(entries),
+            "transferred_reqs": 0,
+            "failed_reqs": 0,
+            "last_error": "",
+        }
+        self._pd_flip_pump_prefill_donor_session(
+            self.pd_flip_prefill_donor_session
+        )
+        status = self._pd_flip_prefill_donor_status_dict()
+        return PDFlipMigrationReqOutput(
+            status.get("state") != "prefill_donor_failed",
+            "prefill donor session started",
+            status=status,
+            manifests=manifests,
+        )
+
+    def get_pd_flip_prefill_donor_status(
+        self, recv_req: PDFlipPrefillDonorStatusReq
+    ) -> PDFlipMigrationReqOutput:
+        session = getattr(self, "pd_flip_prefill_donor_session", None)
+        if not session:
+            return PDFlipMigrationReqOutput(
+                False,
+                "prefill donor session not found",
+                status=self._pd_flip_prefill_donor_status_dict(),
+            )
+        if recv_req.session_id and str(recv_req.session_id) != str(
+            session.get("session_id")
+        ):
+            return PDFlipMigrationReqOutput(
+                False,
+                "prefill donor session id does not match",
+                status=self._pd_flip_prefill_donor_status_dict(),
+            )
+        self._pd_flip_pump_prefill_donor_session(session)
+        status = self._pd_flip_prefill_donor_status_dict()
+        return PDFlipMigrationReqOutput(
+            status.get("state") != "prefill_donor_failed",
+            status=status,
+            manifests=list(session.get("manifests", [])),
+        )
+
+    def abort_pd_flip_prefill_donor(
+        self, recv_req: PDFlipPrefillDonorAbortReq
+    ) -> PDFlipMigrationReqOutput:
+        session = getattr(self, "pd_flip_prefill_donor_session", None)
+        if not session:
+            return PDFlipMigrationReqOutput(
+                True,
+                "prefill donor session is already absent",
+                status=self._pd_flip_prefill_donor_status_dict(),
+            )
+        if recv_req.session_id and str(recv_req.session_id) != str(
+            session.get("session_id")
+        ):
+            return PDFlipMigrationReqOutput(
+                False,
+                "prefill donor session id does not match",
+                status=self._pd_flip_prefill_donor_status_dict(),
+            )
+        for entry in (session.get("entries") or {}).values():
+            if entry.get("phase") in {"transferred", "failed", "aborted"}:
+                continue
+            entry["phase"] = "aborted"
+            entry["error"] = recv_req.reason or "prefill donor aborted"
+            sender = entry.get("sender")
+            if sender is not None and hasattr(sender, "abort"):
+                sender.abort()
+            self._pd_flip_cleanup_prefill_donor_entry(entry)
+        session["state"] = "prefill_donor_aborted"
+        session["last_error"] = recv_req.reason or "prefill donor aborted"
+        session["pending_reqs"] = 0
+        return PDFlipMigrationReqOutput(
+            True,
+            "prefill donor session aborted",
+            status=self._pd_flip_prefill_donor_status_dict(),
+            manifests=list(session.get("manifests", [])),
+        )
+
     def prepare_pd_flip_migration_target_delta(
         self, recv_req: PDFlipMigrationTargetDeltaPrepareReq
     ) -> PDFlipMigrationReqOutput:
@@ -3806,7 +4040,8 @@ class Scheduler(
         buffers.bootstrap_room[metadata_index].zero_()
 
         output_ids = list(getattr(req, "output_ids", []) or [])
-        buffers.output_ids[metadata_index][0] = output_ids[-1]
+        if output_ids:
+            buffers.output_ids[metadata_index][0] = output_ids[-1]
         buffers.cached_tokens[metadata_index][0] = getattr(req, "cached_tokens", 0)
         buffers.cached_tokens[metadata_index][1] = getattr(
             req, "cached_tokens_device", 0
@@ -4937,6 +5172,238 @@ class Scheduler(
         raise RuntimeError(
             f"migration target HiCache restore returned invalid status {status_value!r}"
         )
+
+    def _pd_flip_start_prefill_donor_restore(
+        self, entry: Dict[str, Any]
+    ) -> None:
+        req = entry["req"]
+        donor_end = int(entry["prefill_donor_end"])
+        queue = self.disagg_decode_prealloc_queue
+        prefix_match = queue._match_prefix_and_lock(req)
+        entry["decode_prefix_match"] = prefix_match
+        raw_hit_len = int(prefix_match.decode_prefix_len)
+        entry["prefill_donor_restore_hit_len"] = raw_hit_len
+        entry["expected_restore_len"] = donor_end
+        if raw_hit_len < donor_end:
+            raise RuntimeError(
+                "prefill_donor_incomplete: "
+                f"rid={req.rid}, expected={donor_end}, hit={raw_hit_len}"
+            )
+
+        prefix_len = min(int(prefix_match.l1_prefix_len), donor_end)
+        prefix_match.prefix_indices = prefix_match.prefix_indices[:prefix_len]
+        remaining = donor_end - prefix_len
+        prefix_match.l2_host_hit_length = min(
+            int(prefix_match.l2_host_hit_length), remaining
+        )
+        remaining -= int(prefix_match.l2_host_hit_length)
+        prefix_match.l3_storage_hit_length = min(
+            int(prefix_match.l3_storage_hit_length), remaining
+        )
+
+        queue._pre_alloc(
+            req,
+            prefix_indices=prefix_match.prefix_indices,
+            prefix_len=prefix_len,
+            total_prefix_len=donor_end,
+            fill_len_override=donor_end,
+        )
+        req.cache_protected_len = donor_end
+        decode_req = DecodeRequest(req=req, kv_receiver=None)
+        decode_req.prefix_match = prefix_match
+        entry["decode_req"] = decode_req
+        if prefix_match.needs_local_restore:
+            queue._start_hicache_prefetch(req, prefix_match)
+            entry["phase"] = "restoring"
+        else:
+            entry["phase"] = "ready_to_send"
+
+    def _pd_flip_prepare_prefill_donor_entry(
+        self,
+        manifest: Dict[str, Any],
+        sender_class,
+        kv_manager,
+        bootstrap_addr: str,
+    ) -> Dict[str, Any]:
+        donor_end = int(manifest.get("prefill_donor_end") or 0)
+        donor_room = int(manifest.get("prefill_donor_bootstrap_room") or 0)
+        donor_host = str(manifest.get("prefill_donor_host") or "").strip()
+        donor_port = int(manifest.get("prefill_donor_port") or 0)
+        origin_input_ids = list(manifest.get("origin_input_ids") or [])
+        if not 0 < donor_end <= len(origin_input_ids):
+            raise RuntimeError(
+                "prefill donor manifest has invalid prompt boundary: "
+                f"B={donor_end}, P={len(origin_input_ids)}"
+            )
+        if not donor_host or donor_port <= 0 or donor_room <= 0:
+            raise RuntimeError("prefill donor manifest is missing bootstrap identity")
+
+        donor_manifest = dict(manifest)
+        donor_manifest.update(
+            origin_input_ids=origin_input_ids[:donor_end],
+            output_ids=[],
+            kv_committed_len=donor_end,
+            source_bootstrap_port=donor_port,
+            migration_bootstrap_room=donor_room,
+        )
+        req = self._pd_flip_manifest_to_req(donor_manifest, donor_host)
+        metadata_index = self.req_to_metadata_buffer_idx_allocator.alloc()
+        if metadata_index is None:
+            raise RuntimeError("no metadata buffer available for Prefill donor")
+        try:
+            sender = sender_class(
+                mgr=kv_manager,
+                bootstrap_addr=bootstrap_addr,
+                bootstrap_room=donor_room,
+                dest_tp_ranks=[self.ps.tp_rank],
+                pp_rank=self.ps.pp_rank,
+            )
+        except Exception:
+            self.req_to_metadata_buffer_idx_allocator.free(metadata_index)
+            raise
+        return {
+            "req": req,
+            "sender": sender,
+            "phase": "new",
+            "manifest": manifest,
+            "prefill_donor_end": donor_end,
+            "prefill_donor_bootstrap_room": donor_room,
+            "metadata_index": metadata_index,
+            "metadata_freed": False,
+            "timing_debug": {},
+        }
+
+    def _pd_flip_prefill_donor_restore_pending(
+        self, entry: Dict[str, Any]
+    ) -> bool:
+        decode_req = entry["decode_req"]
+        prefix_match = decode_req.prefix_match
+        if not prefix_match.needs_local_restore:
+            return False
+        transfer_queue = getattr(self, "disagg_decode_transfer_queue", None)
+        if transfer_queue is None or not hasattr(
+            transfer_queue, "_process_hicache_local_restores"
+        ):
+            raise RuntimeError("prefill donor has no HiCache restore processor")
+        transfer_queue._process_hicache_local_restores([decode_req])
+        status_value = getattr(
+            getattr(decode_req, "hicache_restore_status", None), "value", None
+        )
+        if status_value == "pending":
+            return True
+        if status_value == "failed":
+            raise RuntimeError("prefill donor HiCache restore failed")
+        if status_value != "ready":
+            raise RuntimeError(
+                f"prefill donor HiCache restore returned {status_value!r}"
+            )
+        if not hasattr(
+            transfer_queue, "_commit_hicache_local_restore_to_req"
+        ):
+            raise RuntimeError("prefill donor HiCache restore cannot be committed")
+        transfer_queue._commit_hicache_local_restore_to_req(decode_req)
+        donor_end = int(entry["prefill_donor_end"])
+        formal_indices = self.req_to_token_pool.req_to_token[
+            entry["req"].req_pool_idx, :donor_end
+        ]
+        invalid_positions = self._pd_flip_invalid_kv_positions(formal_indices)
+        if invalid_positions:
+            raise RuntimeError(
+                "prefill donor HiCache restore committed invalid KV indices: "
+                f"positions={invalid_positions[:16]}"
+            )
+        return False
+
+    def _pd_flip_send_prefill_donor_pages(
+        self, entry: Dict[str, Any]
+    ) -> None:
+        req = entry["req"]
+        sender = entry["sender"]
+        donor_end = int(entry["prefill_donor_end"])
+        decode_prefix_len = int(sender.pop_decode_prefix_len())
+        if decode_prefix_len != 0:
+            raise RuntimeError(
+                "prefill donor target requested an invalid source offset: "
+                f"{decode_prefix_len}"
+            )
+        self._pd_flip_set_source_metadata(
+            req, entry["metadata_index"], entry["prefill_donor_bootstrap_room"]
+        )
+        page_indices = self._pd_flip_source_page_indices(req, donor_end)
+        sender.init(len(page_indices), entry["metadata_index"])
+        sender.send(
+            page_indices,
+            self._pd_flip_source_state_indices(req, donor_end, sender.kv_mgr),
+        )
+        entry["prefill_donor_pages"] = int(
+            page_indices.size if hasattr(page_indices, "size") else len(page_indices)
+        )
+
+    def _pd_flip_cleanup_prefill_donor_entry(
+        self, entry: Dict[str, Any]
+    ) -> None:
+        if entry.get("cleanup_complete"):
+            return
+        sender = entry.get("sender")
+        if entry.get("phase") == "transferred" and sender is not None and hasattr(
+            sender, "clear"
+        ):
+            sender.clear()
+        req = entry.get("req")
+        if req is not None and getattr(req, "req_pool_idx", None) is not None:
+            release_kv_cache(req, self.tree_cache, is_insert=False)
+        elif req is not None:
+            prefix_match = entry.get("decode_prefix_match")
+            last_device_node = getattr(prefix_match, "last_device_node", None)
+            if last_device_node is not None:
+                self.tree_cache.dec_lock_ref(last_device_node)
+        self._pd_flip_free_source_metadata(entry)
+        entry["cleanup_complete"] = True
+
+    def _pd_flip_pump_prefill_donor_entry(
+        self, entry: Dict[str, Any]
+    ) -> None:
+        if entry.get("phase") in {"transferred", "failed", "aborted"}:
+            return
+        sender = entry["sender"]
+        try:
+            if entry.get("phase") == "new":
+                self._pd_flip_start_prefill_donor_restore(entry)
+            if entry.get("phase") == "restoring":
+                if self._pd_flip_prefill_donor_restore_pending(entry):
+                    return
+                entry["phase"] = "ready_to_send"
+            if entry.get("phase") == "ready_to_send":
+                poll = sender.poll()
+                if poll == KVPoll.Failed:
+                    raise RuntimeError("prefill donor bootstrap failed")
+                if poll != KVPoll.WaitingForInput:
+                    return
+                entry["prefill_donor_transfer_start"] = 0
+                entry["prefill_donor_transfer_end"] = int(
+                    entry["prefill_donor_end"]
+                )
+                self._pd_flip_send_prefill_donor_pages(entry)
+                entry["phase"] = "transferring"
+            if entry.get("phase") == "transferring":
+                poll = sender.poll()
+                if poll == KVPoll.Failed:
+                    raise RuntimeError("prefill donor transfer failed")
+                if poll == KVPoll.Success:
+                    entry["phase"] = "transferred"
+                    self._pd_flip_record_sender_metric(entry, sender, "prefill_donor")
+                    self._pd_flip_cleanup_prefill_donor_entry(entry)
+        except Exception as exc:
+            entry["phase"] = "failed"
+            entry["error"] = str(exc)
+            entry["error_type"] = (
+                "prefill_donor_incomplete"
+                if "prefill_donor_incomplete" in str(exc)
+                else "prefill_donor_failed"
+            )
+            if sender is not None and hasattr(sender, "abort"):
+                sender.abort()
+            self._pd_flip_cleanup_prefill_donor_entry(entry)
 
     def _pd_flip_invalid_kv_positions(self, kv_indices) -> List[int]:
         index_values = kv_indices
@@ -6121,6 +6588,18 @@ class Scheduler(
                 (
                     PDFlipMigrationTargetPrepareReq,
                     self.prepare_pd_flip_migration_target,
+                ),
+                (
+                    PDFlipPrefillDonorStartReq,
+                    self.start_pd_flip_prefill_donor,
+                ),
+                (
+                    PDFlipPrefillDonorStatusReq,
+                    self.get_pd_flip_prefill_donor_status,
+                ),
+                (
+                    PDFlipPrefillDonorAbortReq,
+                    self.abort_pd_flip_prefill_donor,
                 ),
                 (
                     PDFlipMigrationTargetCommitReq,

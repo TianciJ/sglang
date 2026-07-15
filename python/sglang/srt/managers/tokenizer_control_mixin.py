@@ -67,6 +67,9 @@ from sglang.srt.managers.io_struct import (
     PDFlipMigrationTargetDeltaPrepareReq,
     PDFlipMigrationTargetFallbackPrepareReq,
     PDFlipMigrationTargetPrepareReq,
+    PDFlipPrefillDonorAbortReq,
+    PDFlipPrefillDonorStartReq,
+    PDFlipPrefillDonorStatusReq,
     PDRuntimeRoleAdmissionReq,
     PDRuntimeRoleReqOutput,
     PDRuntimeRoleSetReq,
@@ -894,6 +897,25 @@ class TokenizerControlMixin:
                     )
                     self.pd_flip_relay_session_by_rid[str(rid)] = str(session_id)
         return responses
+
+    async def start_pd_flip_prefill_donor(
+        self: TokenizerManager, obj: PDFlipPrefillDonorStartReq
+    ) -> List[PDFlipMigrationReqOutput]:
+        self.auto_create_handle_loop()
+        self._ensure_pd_flip_migration_bootstrap_server()
+        return await self.pd_flip_migration_communicator(obj)
+
+    async def get_pd_flip_prefill_donor_status(
+        self: TokenizerManager, obj: PDFlipPrefillDonorStatusReq
+    ) -> List[PDFlipMigrationReqOutput]:
+        self.auto_create_handle_loop()
+        return await self.pd_flip_migration_communicator(obj)
+
+    async def abort_pd_flip_prefill_donor(
+        self: TokenizerManager, obj: PDFlipPrefillDonorAbortReq
+    ) -> List[PDFlipMigrationReqOutput]:
+        self.auto_create_handle_loop()
+        return await self.pd_flip_migration_communicator(obj)
 
     async def prepare_pd_flip_migration_target(
         self: TokenizerManager, obj: PDFlipMigrationTargetPrepareReq

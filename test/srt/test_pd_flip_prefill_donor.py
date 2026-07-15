@@ -450,3 +450,363 @@ def test_target_donor_entry_uses_source_d_and_original_p_bootstrap():
     assert entry["prefill_decode_req"].kv_receiver.bootstrap_room == 1700
     assert entry["prefill_decode_req"].req.bootstrap_room == 1700
     assert entry["prefill_metadata_index"] == -1
+
+
+def test_prefill_donor_control_protocol_is_wired_end_to_end():
+    io_source = IO_STRUCT_PATH.read_text(encoding="utf-8")
+    scheduler_source = SCHEDULER_PATH.read_text(encoding="utf-8")
+    tokenizer_source = (
+        REPO_ROOT / "python/sglang/srt/managers/tokenizer_control_mixin.py"
+    ).read_text(encoding="utf-8")
+    http_source = (
+        REPO_ROOT / "python/sglang/srt/entrypoints/http_server.py"
+    ).read_text(encoding="utf-8")
+
+    for class_name in (
+        "PDFlipPrefillDonorStartReq",
+        "PDFlipPrefillDonorStatusReq",
+        "PDFlipPrefillDonorAbortReq",
+    ):
+        assert f"class {class_name}(BaseReq):" in io_source
+        assert class_name in scheduler_source
+        assert class_name in tokenizer_source
+        assert class_name in http_source
+    for method_name in (
+        "start_pd_flip_prefill_donor",
+        "get_pd_flip_prefill_donor_status",
+        "abort_pd_flip_prefill_donor",
+    ):
+        assert f"def {method_name}(" in scheduler_source
+        assert f"async def {method_name}(" in tokenizer_source
+    for route in (
+        "/pd_flip/migration/prefill-donor/start",
+        "/pd_flip/migration/prefill-donor/status",
+        "/pd_flip/migration/prefill-donor/abort",
+    ):
+        assert route in http_source
+
+
+def test_prefill_donor_restore_rejects_hit_shorter_than_complete_pages():
+    start_restore = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_start_prefill_donor_restore",
+        {"Any": Any, "Dict": Dict, "DecodeRequest": object},
+    )
+    match = types.SimpleNamespace(
+        decode_prefix_len=1856,
+        l1_prefix_len=64,
+        l2_host_hit_length=1792,
+        l3_storage_hit_length=0,
+        prefix_indices=_Tensor(np.arange(1, 65)),
+        needs_local_restore=True,
+    )
+    prealloc_calls = []
+    scheduler = types.SimpleNamespace(
+        disagg_decode_prealloc_queue=types.SimpleNamespace(
+            _match_prefix_and_lock=lambda _req: match,
+            _pre_alloc=lambda *args, **kwargs: prealloc_calls.append((args, kwargs)),
+            _start_hicache_prefetch=lambda *_args: None,
+        )
+    )
+    entry = {
+        "req": types.SimpleNamespace(rid="r0"),
+        "prefill_donor_end": 1920,
+    }
+
+    with pytest.raises(RuntimeError, match="prefill_donor_incomplete"):
+        start_restore(scheduler, entry)
+
+    assert prealloc_calls == []
+    assert entry["prefill_donor_restore_hit_len"] == 1856
+    assert entry["expected_restore_len"] == 1920
+
+
+def test_prefill_donor_restore_trims_hit_to_exact_donor_boundary():
+    start_restore = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_start_prefill_donor_restore",
+        {"Any": Any, "Dict": Dict, "DecodeRequest": types.SimpleNamespace},
+    )
+    match = types.SimpleNamespace(
+        decode_prefix_len=1974,
+        l1_prefix_len=64,
+        l2_host_hit_length=1856,
+        l3_storage_hit_length=54,
+        prefix_indices=_Tensor(np.arange(1, 65)),
+        needs_local_restore=True,
+    )
+    prealloc_kwargs = []
+    prefetched = []
+    queue = types.SimpleNamespace(
+        _match_prefix_and_lock=lambda _req: match,
+        _pre_alloc=lambda _req, **kwargs: prealloc_kwargs.append(kwargs),
+        _start_hicache_prefetch=lambda req, prefix_match: prefetched.append(
+            (req, prefix_match)
+        ),
+    )
+    scheduler = types.SimpleNamespace(disagg_decode_prealloc_queue=queue)
+    req = types.SimpleNamespace(rid="r0", cache_protected_len=None)
+    entry = {"req": req, "prefill_donor_end": 1920}
+
+    start_restore(scheduler, entry)
+
+    assert entry["phase"] == "restoring"
+    assert entry["prefill_donor_restore_hit_len"] == 1974
+    assert match.l1_prefix_len == 64
+    assert match.l2_host_hit_length == 1856
+    assert match.l3_storage_hit_length == 0
+    assert prealloc_kwargs == [
+        {
+            "prefix_indices": match.prefix_indices,
+            "prefix_len": 64,
+            "total_prefix_len": 1920,
+            "fill_len_override": 1920,
+        }
+    ]
+    assert req.cache_protected_len == 1920
+    assert prefetched == [(req, match)]
+
+
+def test_prefill_donor_pump_sends_after_restore_and_reaches_transferred():
+    pump = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_pump_prefill_donor_entry",
+        {"Any": Any, "Dict": Dict, "KVPoll": _Poll},
+    )
+    sender = _PollingReceiver([_Poll.WaitingForInput, _Poll.Success])
+    sends = []
+    cleaned = []
+    entry = {
+        "req": types.SimpleNamespace(rid="r0"),
+        "sender": sender,
+        "phase": "new",
+        "prefill_donor_end": 1920,
+    }
+
+    def start_restore(current):
+        current["prefill_donor_restore_hit_len"] = 1974
+        current["phase"] = "ready_to_send"
+
+    scheduler = types.SimpleNamespace(
+        _pd_flip_start_prefill_donor_restore=start_restore,
+        _pd_flip_prefill_donor_restore_pending=lambda _entry: False,
+        _pd_flip_send_prefill_donor_pages=lambda current: sends.append(current),
+        _pd_flip_record_sender_metric=lambda *_args: None,
+        _pd_flip_cleanup_prefill_donor_entry=lambda current: cleaned.append(current),
+    )
+
+    pump(scheduler, entry)
+
+    assert sends == [entry]
+    assert entry["phase"] == "transferred"
+    assert entry["prefill_donor_transfer_start"] == 0
+    assert entry["prefill_donor_transfer_end"] == 1920
+    assert cleaned == [entry]
+
+
+def test_prefill_donor_pump_marks_strict_restore_miss_without_sending():
+    pump = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_pump_prefill_donor_entry",
+        {"Any": Any, "Dict": Dict, "KVPoll": _Poll},
+    )
+    sender = _PollingReceiver([])
+    cleaned = []
+    entry = {
+        "req": types.SimpleNamespace(rid="r0"),
+        "sender": sender,
+        "phase": "new",
+        "prefill_donor_end": 1920,
+    }
+    scheduler = types.SimpleNamespace(
+        _pd_flip_start_prefill_donor_restore=lambda _entry: (_ for _ in ()).throw(
+            RuntimeError("prefill_donor_incomplete: expected=1920, hit=1856")
+        ),
+        _pd_flip_cleanup_prefill_donor_entry=lambda current: cleaned.append(current),
+    )
+
+    pump(scheduler, entry)
+
+    assert entry["phase"] == "failed"
+    assert entry["error_type"] == "prefill_donor_incomplete"
+    assert sender.aborted is True
+    assert cleaned == [entry]
+
+
+def test_prefill_donor_entry_builds_truncated_prompt_sender():
+    prepare = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_prepare_prefill_donor_entry",
+        {"Any": Any, "Dict": Dict},
+    )
+
+    class Sender:
+        def __init__(
+            self, mgr, bootstrap_addr, bootstrap_room, dest_tp_ranks, pp_rank
+        ):
+            self.mgr = mgr
+            self.bootstrap_addr = bootstrap_addr
+            self.bootstrap_room = bootstrap_room
+            self.dest_tp_ranks = dest_tp_ranks
+            self.pp_rank = pp_rank
+
+    def manifest_to_req(manifest, host):
+        return types.SimpleNamespace(
+            rid=manifest["rid"],
+            origin_input_ids=list(manifest["origin_input_ids"]),
+            output_ids=list(manifest["output_ids"]),
+            kv_committed_len=manifest["kv_committed_len"],
+            bootstrap_host=host,
+            bootstrap_port=manifest["source_bootstrap_port"],
+            bootstrap_room=manifest["migration_bootstrap_room"],
+            req_pool_idx=None,
+        )
+
+    scheduler = types.SimpleNamespace(
+        _pd_flip_manifest_to_req=manifest_to_req,
+        req_to_metadata_buffer_idx_allocator=_Allocator([7]),
+        ps=types.SimpleNamespace(tp_rank=2, pp_rank=0),
+    )
+    manifest = {
+        "rid": "r0",
+        "origin_input_ids": list(range(1974)),
+        "output_ids": list(range(100)),
+        "prefill_donor_host": "prefill-p",
+        "prefill_donor_port": 8998,
+        "prefill_donor_bootstrap_room": 1700,
+        "prefill_donor_end": 1920,
+        "kv_committed_len": 2073,
+    }
+    kv_manager = object()
+
+    entry = prepare(
+        scheduler, manifest, Sender, kv_manager, "prefill-p:8998"
+    )
+
+    assert len(entry["req"].origin_input_ids) == 1920
+    assert entry["req"].output_ids == []
+    assert entry["req"].kv_committed_len == 1920
+    assert entry["sender"].bootstrap_room == 1700
+    assert entry["sender"].dest_tp_ranks == [2]
+    assert entry["metadata_index"] == 7
+    assert entry["phase"] == "new"
+
+
+def test_prefill_donor_restore_ready_commits_before_transfer():
+    restore_pending = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_prefill_donor_restore_pending",
+        {"Any": Any, "Dict": Dict},
+    )
+    commits = []
+    decode_req = types.SimpleNamespace(
+        prefix_match=types.SimpleNamespace(needs_local_restore=True),
+        hicache_restore_status=types.SimpleNamespace(value="ready"),
+    )
+    req = types.SimpleNamespace(req_pool_idx=0)
+    transfer_queue = types.SimpleNamespace(
+        _process_hicache_local_restores=lambda reqs: None,
+        _commit_hicache_local_restore_to_req=lambda current: commits.append(current),
+    )
+    scheduler = types.SimpleNamespace(
+        disagg_decode_transfer_queue=transfer_queue,
+        req_to_token_pool=types.SimpleNamespace(
+            req_to_token=_Tensor([np.arange(1, 65)])
+        ),
+        _pd_flip_invalid_kv_positions=lambda _indices: [],
+    )
+    entry = {
+        "decode_req": decode_req,
+        "req": req,
+        "prefill_donor_end": 64,
+    }
+
+    assert restore_pending(scheduler, entry) is False
+    assert commits == [decode_req]
+
+
+def test_prefill_donor_cleanup_unlocks_match_when_alloc_never_started():
+    cleanup = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_cleanup_prefill_donor_entry",
+        {"Any": Any, "Dict": Dict, "release_kv_cache": lambda *_args, **_kwargs: None},
+    )
+    unlocked = []
+    node = object()
+    scheduler = types.SimpleNamespace(
+        tree_cache=types.SimpleNamespace(dec_lock_ref=lambda current: unlocked.append(current)),
+        _pd_flip_free_source_metadata=lambda _entry: None,
+    )
+    entry = {
+        "req": types.SimpleNamespace(req_pool_idx=None),
+        "sender": None,
+        "phase": "failed",
+        "decode_prefix_match": types.SimpleNamespace(last_device_node=node),
+    }
+
+    cleanup(scheduler, entry)
+    cleanup(scheduler, entry)
+
+    assert unlocked == [node]
+
+
+class _ZeroBuffer:
+    def __init__(self, shape):
+        self.values = np.ones(shape, dtype=np.int64)
+
+    def __getitem__(self, item):
+        value = self.values[item]
+        if isinstance(value, np.ndarray):
+            wrapped = _ZeroBuffer(value.shape)
+            wrapped.values = value
+            return wrapped
+        return value
+
+    def __setitem__(self, item, value):
+        self.values[item] = value
+
+    def zero_(self):
+        self.values[...] = 0
+
+
+def test_prefill_donor_metadata_accepts_synthetic_request_without_output_ids():
+    set_metadata = _load_class_method(
+        SCHEDULER_PATH,
+        "Scheduler",
+        "_pd_flip_set_source_metadata",
+        {"Req": object},
+    )
+    buffers = types.SimpleNamespace(
+        output_ids=_ZeroBuffer((2, 4)),
+        cached_tokens=_ZeroBuffer((2, 4)),
+        output_token_logprobs_val=_ZeroBuffer((2, 4)),
+        output_token_logprobs_idx=_ZeroBuffer((2, 4)),
+        output_top_logprobs_val=_ZeroBuffer((2, 4)),
+        output_top_logprobs_idx=_ZeroBuffer((2, 4)),
+        output_topk_p=_ZeroBuffer((2, 4)),
+        output_topk_index=_ZeroBuffer((2, 4)),
+        output_hidden_states=_ZeroBuffer((2, 4)),
+        bootstrap_room=_ZeroBuffer((2, 1)),
+    )
+    scheduler = types.SimpleNamespace(disagg_metadata_buffers=buffers)
+    req = types.SimpleNamespace(
+        output_ids=[],
+        cached_tokens=0,
+        cached_tokens_device=0,
+        cached_tokens_host=0,
+        cached_tokens_storage=0,
+        return_logprob=False,
+        hidden_states_tensor=None,
+    )
+
+    set_metadata(scheduler, req, 1, 1700)
+
+    assert buffers.output_ids.values[1, 0] == 0
+    assert buffers.bootstrap_room.values[1, 0] == 1700

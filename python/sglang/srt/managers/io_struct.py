@@ -1760,6 +1760,23 @@ class PDFlipMigrationTargetPrepareReq(BaseReq):
 
 
 @dataclass
+class PDFlipPrefillDonorStartReq(BaseReq):
+    session_id: Optional[str] = None
+    manifests: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class PDFlipPrefillDonorStatusReq(BaseReq):
+    session_id: Optional[str] = None
+
+
+@dataclass
+class PDFlipPrefillDonorAbortReq(BaseReq):
+    session_id: Optional[str] = None
+    reason: str = ""
+
+
+@dataclass
 class PDFlipMigrationStatusReq(BaseReq):
     session_id: Optional[str] = None
 

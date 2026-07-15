@@ -140,6 +140,9 @@ from sglang.srt.managers.io_struct import (
     PDFlipMigrationTargetDeltaPrepareReq,
     PDFlipMigrationTargetFallbackPrepareReq,
     PDFlipMigrationTargetPrepareReq,
+    PDFlipPrefillDonorAbortReq,
+    PDFlipPrefillDonorStartReq,
+    PDFlipPrefillDonorStatusReq,
     PDRuntimeRoleAdmissionReq,
     PDRuntimeRoleSetReq,
     PDRuntimeRoleStatusReq,
@@ -723,6 +726,32 @@ async def prepare_pd_flip_migration_target(
     obj: PDFlipMigrationTargetPrepareReq, request: Request
 ):
     return await _global_state.tokenizer_manager.prepare_pd_flip_migration_target(obj)
+
+
+@app.post("/pd_flip/migration/prefill-donor/start")
+@auth_level(AuthLevel.ADMIN_REQUIRED)
+async def start_pd_flip_prefill_donor(
+    obj: PDFlipPrefillDonorStartReq, request: Request
+):
+    return await _global_state.tokenizer_manager.start_pd_flip_prefill_donor(obj)
+
+
+@app.get("/pd_flip/migration/prefill-donor/status")
+@auth_level(AuthLevel.ADMIN_REQUIRED)
+async def get_pd_flip_prefill_donor_status(request: Request):
+    return await _global_state.tokenizer_manager.get_pd_flip_prefill_donor_status(
+        PDFlipPrefillDonorStatusReq(
+            session_id=request.query_params.get("session_id")
+        )
+    )
+
+
+@app.post("/pd_flip/migration/prefill-donor/abort")
+@auth_level(AuthLevel.ADMIN_REQUIRED)
+async def abort_pd_flip_prefill_donor(
+    obj: PDFlipPrefillDonorAbortReq, request: Request
+):
+    return await _global_state.tokenizer_manager.abort_pd_flip_prefill_donor(obj)
 
 
 @app.post("/pd_flip/migration/target/commit")
