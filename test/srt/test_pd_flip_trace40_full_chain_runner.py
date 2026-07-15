@@ -128,8 +128,8 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             "--observation-seconds",
             "--interval-seconds 0.05",
             "chronyc tracking",
-            "target_hicache_restore",
-            "fallback",
+            "target-local HiCache matching",
+            "source-full fallback",
             "b64decode",
             "git-unavailable",
             "prepare-trace-in-container",
@@ -143,8 +143,22 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             "trace40_scheduled.jsonl",
             "TRACE_WAVE_GAP_SECONDS",
             "python/sglang/srt/disaggregation/decode.py",
+            "python/sglang/srt/managers/io_struct.py",
+            "python/sglang/srt/managers/scheduler.py",
+            "--enable-pd-flip-prefill-donor",
+            "--prefill-donor-mode",
         ):
             self.assertIn(value, source)
+
+    def test_prefill_donor_mode_is_required_by_worker_preflight_and_controller(self):
+        source = RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "assert '--enable-pd-flip-prefill-donor' in decoded", source
+        )
+        self.assertIn(
+            "pd_flip_controller.py --prefill-donor-mode --router-url", source
+        )
 
     def test_router_is_restarted_after_workers_are_healthy(self):
         source = RUNNER.read_text(encoding="utf-8")

@@ -52,9 +52,13 @@ TRACE_INTRA_WAVE_INTERVAL_SECONDS="${TRACE_INTRA_WAVE_INTERVAL_SECONDS:-0.15}"
 TRACE_TTFT_SLO_OVERRIDE_SECONDS="${TRACE_TTFT_SLO_OVERRIDE_SECONDS:-0}"
 SSH_OPTIONS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
 CODE_HASH_FILES=(
+  python/sglang/srt/server_args.py
   python/sglang/srt/disaggregation/decode.py
   python/sglang/srt/disaggregation/decode_hicache_mixin.py
+  python/sglang/srt/managers/io_struct.py
   python/sglang/srt/managers/scheduler.py
+  python/sglang/srt/managers/tokenizer_control_mixin.py
+  python/sglang/srt/entrypoints/http_server.py
   python/sglang/srt/managers/scheduler_components/invariant_checker.py
   python/sglang/srt/mem_cache/radix_cache.py
   scripts/playground/disaggregation/pd_flip_controller.py
@@ -165,7 +169,7 @@ preflight() {
   remote "${HOSTS[0]}" "python3 -c \"import json; rows=[json.loads(line) for line in open('${TRACE_PATH}', encoding='utf-8') if line.strip()]; assert len(rows) == 40; assert [row.get('prompt_kind') for row in rows] == ['long','short'] * 20; assert sum(row.get('prompt_chars') == 10000 for row in rows) == 20; assert sum(row.get('prompt_chars') == 1000 for row in rows) == 20; assert all(float(row.get('ttft_slo_s', 0)) > 0 and float(row.get('tpot_slo_s', 0)) > 0 for row in rows)\""
   if [[ "${DRY_RUN}" != "1" ]]; then
     for i in "${!HOSTS[@]}"; do
-      remote "${HOSTS[$i]}" "docker inspect '${WORKER_CONTAINERS[$i]}' --format '{{json .Config.Cmd}}' | python3 -c \"import base64,json,sys; cmd=' '.join(json.load(sys.stdin)); parts=cmd.split(); pos=parts.index('echo') if 'echo' in parts else -1; decoded=base64.b64decode(parts[pos + 1]).decode('utf-8') if pos >= 0 and len(parts) > pos + 1 else cmd; assert '--enable-pd-flip-hicache-stitch' in decoded\""
+      remote "${HOSTS[$i]}" "docker inspect '${WORKER_CONTAINERS[$i]}' --format '{{json .Config.Cmd}}' | python3 -c \"import base64,json,sys; cmd=' '.join(json.load(sys.stdin)); parts=cmd.split(); pos=parts.index('echo') if 'echo' in parts else -1; decoded=base64.b64decode(parts[pos + 1]).decode('utf-8') if pos >= 0 and len(parts) > pos + 1 else cmd; assert '--enable-pd-flip-hicache-stitch' in decoded; assert '--enable-pd-flip-prefill-donor' in decoded\""
       remote "${HOSTS[$i]}" "docker inspect '${WORKER_CONTAINERS[$i]}' --format '{{range .Mounts}}{{println .Source .Destination}}{{end}}' | grep -Fq '${SGLANG_REPO} /sgl-workspace/sglang'"
     done
     local hash_file_args reference_hash node_hash
@@ -236,9 +240,10 @@ start_workload() {
 }
 
 start_controller() {
-  # The target_hicache_restore and fallback phases remain enabled and are timed
-  # independently by Worker request_measurements and the 50 ms sidecar.
-  remote "${HOSTS[0]}" "! docker inspect '${CONTROLLER_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${CONTROLLER_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_controller.py --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000,router_worker_id=http://192.168.0.42:30000,bootstrap_port=8998 --node name=node1,worker_url=http://192.168.0.40:30000,router_worker_id=http://192.168.0.40:30000,bootstrap_port=8998 --node name=node2,worker_url=http://192.168.0.39:30000,router_worker_id=http://192.168.0.39:30000,bootstrap_port=8998 --node name=node3,worker_url=http://192.168.0.41:30000,router_worker_id=http://192.168.0.41:30000,bootstrap_port=8998 --api-key-env ADMIN_API_KEY --first-migration-ratio '${FIRST_MIGRATION_RATIO}' --observation-seconds '${OBSERVATION_SECONDS}' --slo-threshold '${SLO_THRESHOLD}' --min-prefill-slo-samples '${MIN_PREFILL_SAMPLES}' --min-decode-slo-samples '${MIN_DECODE_SAMPLES}' --session-journal-path '${RUN_DIR}/controller/pd_flip_session.json' --session-id-prefix '${RUN_ID}' monitor-progressive --trace-slo-ledger '${LEDGER}' --source-name '${SOURCE_NAME}' --migration-target-name '${MIGRATION_TARGET_NAME}' --iterations '${MONITOR_ITERATIONS}' --poll-interval '${MONITOR_POLL_INTERVAL}'\""
+  # Donor mode makes the original Prefill node authoritative for complete
+  # prompt pages; target-local HiCache matching and source-full fallback are
+  # forbidden by the controller protocol.
+  remote "${HOSTS[0]}" "! docker inspect '${CONTROLLER_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${CONTROLLER_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_controller.py --prefill-donor-mode --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000,router_worker_id=http://192.168.0.42:30000,bootstrap_port=8998 --node name=node1,worker_url=http://192.168.0.40:30000,router_worker_id=http://192.168.0.40:30000,bootstrap_port=8998 --node name=node2,worker_url=http://192.168.0.39:30000,router_worker_id=http://192.168.0.39:30000,bootstrap_port=8998 --node name=node3,worker_url=http://192.168.0.41:30000,router_worker_id=http://192.168.0.41:30000,bootstrap_port=8998 --api-key-env ADMIN_API_KEY --first-migration-ratio '${FIRST_MIGRATION_RATIO}' --observation-seconds '${OBSERVATION_SECONDS}' --slo-threshold '${SLO_THRESHOLD}' --min-prefill-slo-samples '${MIN_PREFILL_SAMPLES}' --min-decode-slo-samples '${MIN_DECODE_SAMPLES}' --session-journal-path '${RUN_DIR}/controller/pd_flip_session.json' --session-id-prefix '${RUN_ID}' monitor-progressive --trace-slo-ledger '${LEDGER}' --source-name '${SOURCE_NAME}' --migration-target-name '${MIGRATION_TARGET_NAME}' --iterations '${MONITOR_ITERATIONS}' --poll-interval '${MONITOR_POLL_INTERVAL}'\""
 }
 
 collect() {
