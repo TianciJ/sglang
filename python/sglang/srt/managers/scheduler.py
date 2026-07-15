@@ -2284,6 +2284,17 @@ class Scheduler(
         if not session:
             return {"state": "idle", "role": "prefill_donor"}
         entries = session.get("entries") or {}
+
+        def elapsed(entry: Dict[str, Any], start: str, end: str):
+            timing = entry.get("timing_debug") or {}
+            started = timing.get(f"{start}_mono")
+            completed = timing.get(f"{end}_mono")
+            if not isinstance(started, (int, float)) or not isinstance(
+                completed, (int, float)
+            ):
+                return None
+            return max(0.0, completed - started)
+
         return {
             "session_id": session.get("session_id"),
             "role": "prefill_donor",
@@ -2293,9 +2304,10 @@ class Scheduler(
             "failed_reqs": int(session.get("failed_reqs", 0) or 0),
             "last_error": session.get("last_error", ""),
             "entries": {
-                rid: {
-                    key: entry.get(key)
-                    for key in (
+                rid: dict(
+                    {
+                        key: entry.get(key)
+                        for key in (
                         "phase",
                         "error",
                         "error_type",
@@ -2307,9 +2319,31 @@ class Scheduler(
                         "prefill_donor_pages",
                         "prefill_donor_transfer_bytes",
                         "prefill_donor_transfer_duration_s",
+                        )
+                        if entry.get(key) is not None
+                    },
+                    prompt_len=(entry.get("manifest") or {}).get("prompt_len"),
+                    source_decode_start=(entry.get("manifest") or {}).get(
+                        "source_decode_start"
+                    ),
+                    prefill_donor_host=(entry.get("manifest") or {}).get(
+                        "prefill_donor_host"
+                    ),
+                    prefill_donor_restore_seconds=elapsed(
+                        entry,
+                        "prefill_donor_restore_started",
+                        "prefill_donor_restore_completed",
+                    ),
+                    prefill_donor_transfer_seconds=entry.get(
+                        "prefill_donor_transfer_duration_s"
                     )
-                    if entry.get(key) is not None
-                }
+                    or elapsed(
+                        entry,
+                        "prefill_donor_transfer_started",
+                        "prefill_donor_transfer_completed",
+                    ),
+                    provenance_mode="prefill_donor_and_source_decode",
+                )
                 for rid, entry in entries.items()
             },
         }
@@ -5176,6 +5210,9 @@ class Scheduler(
     def _pd_flip_start_prefill_donor_restore(
         self, entry: Dict[str, Any]
     ) -> None:
+        note_timing = getattr(self, "_pd_flip_note_timing", None)
+        if callable(note_timing):
+            note_timing(entry, "prefill_donor_restore_started")
         req = entry["req"]
         donor_end = int(entry["prefill_donor_end"])
         queue = self.disagg_decode_prealloc_queue
@@ -5217,6 +5254,8 @@ class Scheduler(
             entry["phase"] = "restoring"
         else:
             entry["phase"] = "ready_to_send"
+            if callable(note_timing):
+                note_timing(entry, "prefill_donor_restore_completed")
 
     def _pd_flip_prepare_prefill_donor_entry(
         self,
@@ -5312,6 +5351,9 @@ class Scheduler(
                 "prefill donor HiCache restore committed invalid KV indices: "
                 f"positions={invalid_positions[:16]}"
             )
+        note_timing = getattr(self, "_pd_flip_note_timing", None)
+        if callable(note_timing):
+            note_timing(entry, "prefill_donor_restore_completed")
         return False
 
     def _pd_flip_send_prefill_donor_pages(
@@ -5383,6 +5425,9 @@ class Scheduler(
                 entry["prefill_donor_transfer_end"] = int(
                     entry["prefill_donor_end"]
                 )
+                note_timing = getattr(self, "_pd_flip_note_timing", None)
+                if callable(note_timing):
+                    note_timing(entry, "prefill_donor_transfer_started")
                 self._pd_flip_send_prefill_donor_pages(entry)
                 entry["phase"] = "transferring"
             if entry.get("phase") == "transferring":
@@ -5391,6 +5436,9 @@ class Scheduler(
                     raise RuntimeError("prefill donor transfer failed")
                 if poll == KVPoll.Success:
                     entry["phase"] = "transferred"
+                    note_timing = getattr(self, "_pd_flip_note_timing", None)
+                    if callable(note_timing):
+                        note_timing(entry, "prefill_donor_transfer_completed")
                     self._pd_flip_record_sender_metric(entry, sender, "prefill_donor")
                     self._pd_flip_cleanup_prefill_donor_entry(entry)
         except Exception as exc:
@@ -6197,6 +6245,38 @@ class Scheduler(
                     else entry.get("mooncake_hit_len"),
                     "c0_tokens": int(c0 or 0),
                     "c1_tokens": int(c1 or 0),
+                    "prompt_len": base_manifest.get("prompt_len")
+                    or len(base_manifest.get("origin_input_ids") or []),
+                    "prefill_donor_end": base_manifest.get("prefill_donor_end"),
+                    "source_decode_start": base_manifest.get(
+                        "source_decode_start"
+                    ),
+                    "prefill_donor_host": base_manifest.get("prefill_donor_host"),
+                    "prefill_donor_restore_hit_len": entry.get(
+                        "prefill_donor_restore_hit_len"
+                    ),
+                    "prefill_donor_pages": entry.get("prefill_donor_pages"),
+                    "prefill_donor_transfer_bytes": entry.get(
+                        "prefill_donor_transfer_bytes"
+                    ),
+                    "prefill_donor_restore_seconds": entry.get(
+                        "prefill_donor_restore_seconds"
+                    ),
+                    "prefill_donor_transfer_seconds": entry.get(
+                        "prefill_donor_transfer_duration_s"
+                    ),
+                    "source_base_pages": entry.get("source_index_size"),
+                    "source_base_transfer_bytes": entry.get(
+                        "source_transfer_bytes"
+                    ),
+                    "target_prefix_match_skipped": entry.get(
+                        "target_prefix_match_skipped"
+                    ),
+                    "provenance_mode": (
+                        "prefill_donor_and_source_decode"
+                        if base_manifest.get("prefill_donor_host")
+                        else "target_hicache_or_source_decode"
+                    ),
                     "stitch_mode": entry.get("stitch_mode"),
                     "original_stitch_mode": entry.get("original_stitch_mode"),
                     "l1_hit_tokens": entry.get("target_hicache_l1_prefix_len"),

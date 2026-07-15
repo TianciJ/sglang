@@ -160,6 +160,26 @@ def collect_worker_events(client: HttpClient, node: JsonDict) -> List[JsonDict]:
         migration_event["error"] = repr(exc)
     events.append(migration_event)
 
+    donor_event = now_fields()
+    donor_event.update(
+        {
+            "event_type": "prefill_donor_status",
+            "component": "worker",
+            "node": name,
+            "url": base,
+        }
+    )
+    try:
+        donor_payload = client.get_json(
+            base + "/pd_flip/migration/prefill-donor/status"
+        )
+        donor_event["ok"] = True
+        donor_event["status"] = unwrap_migration_status(donor_payload)
+    except Exception as exc:
+        donor_event["ok"] = False
+        donor_event["error"] = repr(exc)
+    events.append(donor_event)
+
     load_event = now_fields()
     load_event.update(
         {"event_type": "worker_load", "component": "worker", "node": name, "url": base}
@@ -631,9 +651,26 @@ def flatten_migration_request_samples(events: Sequence[JsonDict]) -> List[JsonDi
     rows = []
     request_fields = migration_request_fields()[4:]
     for event in events:
-        if event.get("event_type") != "migration_status":
+        event_type = event.get("event_type")
+        if event_type not in {"migration_status", "prefill_donor_status"}:
             continue
         status = event.get("status") or {}
+        if event_type == "prefill_donor_status":
+            for rid, measurement in (status.get("entries") or {}).items():
+                if not isinstance(measurement, dict):
+                    continue
+                row = {
+                    "ts_wall": event.get("ts_wall"),
+                    "ts_mono": event.get("ts_mono"),
+                    "node": event.get("node"),
+                    "session_id": status.get("session_id"),
+                    "rid": str(rid),
+                }
+                for field in request_fields:
+                    if field != "rid":
+                        row[field] = measurement.get(field)
+                rows.append(row)
+            continue
         sessions = [status]
         while sessions:
             session = sessions.pop(0)
@@ -1042,6 +1079,19 @@ def migration_request_fields() -> List[str]:
         "h_tokens",
         "c0_tokens",
         "c1_tokens",
+        "prompt_len",
+        "prefill_donor_end",
+        "source_decode_start",
+        "prefill_donor_host",
+        "prefill_donor_restore_hit_len",
+        "prefill_donor_pages",
+        "prefill_donor_transfer_bytes",
+        "prefill_donor_restore_seconds",
+        "prefill_donor_transfer_seconds",
+        "source_base_pages",
+        "source_base_transfer_bytes",
+        "target_prefix_match_skipped",
+        "provenance_mode",
         "stitch_mode",
         "original_stitch_mode",
         "l1_hit_tokens",

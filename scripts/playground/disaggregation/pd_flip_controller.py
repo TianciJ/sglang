@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib import error, request
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 try:
     from pd_flip_monitor import ClusterSLOSnapshot, PDFlipSLOMonitor
@@ -77,13 +77,17 @@ def _migration_source_start_payload(
     target_url: str,
     rids: Optional[List[str]],
     include_waiting: bool = False,
+    prefill_donor_mode: bool = False,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "session_id": session_id,
         "target_url": target_url,
         "rids": None if rids is None else list(rids),
         "include_waiting": include_waiting,
     }
+    if prefill_donor_mode:
+        payload["prefill_donor_mode"] = True
+    return payload
 
 
 JsonDict = Dict[str, Any]
@@ -171,6 +175,7 @@ class PDClusterConfig:
     min_decode_slo_samples: int = 20
     session_journal_path: str = "pd_flip_session.json"
     session_id_prefix: Optional[str] = None
+    prefill_donor_mode: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.first_migration_ratio < 1:
@@ -230,6 +235,7 @@ class PDClusterConfig:
             session_id_prefix=(
                 str(data["session_id_prefix"]) if data.get("session_id_prefix") else None
             ),
+            prefill_donor_mode=bool(data.get("prefill_donor_mode", False)),
         )
 
 
@@ -402,6 +408,33 @@ class PDFlipController:
         if self.config.session_id_prefix:
             return self.config.session_id_prefix
         return f"pd-flip-{source.name}-to-{target.name}-{uuid.uuid4().hex}"
+
+    def _resolve_prefill_donor_groups(
+        self, manifests: Sequence[JsonDict]
+    ) -> Dict[str, List[JsonDict]]:
+        nodes_by_host: Dict[str, List[PDNode]] = {}
+        for node in self.config.nodes:
+            hostname = (urlparse(node.worker_url).hostname or "").lower()
+            if hostname:
+                nodes_by_host.setdefault(hostname, []).append(node)
+
+        groups: Dict[str, List[JsonDict]] = {}
+        for manifest in manifests:
+            if int(manifest.get("prefill_donor_end") or 0) == 0:
+                continue
+            donor_host = str(manifest.get("prefill_donor_host") or "").lower()
+            matches = nodes_by_host.get(donor_host, [])
+            if not matches:
+                raise RuntimeError(
+                    f"original Prefill donor host is not configured: {donor_host!r}"
+                )
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "ambiguous original Prefill donor host: "
+                    f"{donor_host!r} matches {[node.name for node in matches]}"
+                )
+            groups.setdefault(matches[0].worker_url, []).append(manifest)
+        return groups
 
     @staticmethod
     def _journal_record(
@@ -667,7 +700,13 @@ class PDFlipController:
                 },
             )
             abort_complete = self._abort_two_phase_migration(
-                source, target, session_id, records
+                source,
+                target,
+                session_id,
+                records,
+                prefill_donor_urls=tuple(
+                    record.get("prefill_donor_urls") or []
+                ),
             )
             self._write_journal_phase(
                 source,
@@ -710,7 +749,13 @@ class PDFlipController:
                 )
             if source_states != {"source_released"}:
                 abort_complete = self._abort_two_phase_migration(
-                    source, target, session_id, records
+                    source,
+                    target,
+                    session_id,
+                    records,
+                    prefill_donor_urls=tuple(
+                        record.get("prefill_donor_urls") or []
+                    ),
                 )
                 if abort_complete:
                     self._resume_decode_source(source, records)
@@ -900,7 +945,13 @@ class PDFlipController:
                 source, target, session_id, batch_rids, "abort_intent", False
             )
             abort_complete = self._abort_two_phase_migration(
-                source, target, session_id, records
+                source,
+                target,
+                session_id,
+                records,
+                prefill_donor_urls=tuple(
+                    record.get("prefill_donor_urls") or []
+                ),
             )
             self._write_journal_phase(
                 source,
@@ -1626,6 +1677,7 @@ class PDFlipController:
         source_finished = False
         cutover_started = False
         journal_rids = requested_rids
+        prefill_donor_groups: Dict[str, List[JsonDict]] = {}
         try:
             self._write_journal_phase(
                 source,
@@ -1652,6 +1704,7 @@ class PDFlipController:
                     target.worker_url,
                     list(requested_rids),
                     include_waiting=include_waiting,
+                    prefill_donor_mode=self.config.prefill_donor_mode,
                 ),
             )
             manifests = _strict_response_manifests(
@@ -1671,31 +1724,86 @@ class PDFlipController:
                 )
 
             journal_rids = batch_rids
+            if self.config.prefill_donor_mode:
+                prefill_donor_groups = self._resolve_prefill_donor_groups(manifests)
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "source_started"
             )
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "target_prepare_intent"
             )
+            target_payload = {
+                "session_id": session_id,
+                "source_url": source.worker_url,
+                "manifests": manifests,
+                "prepare_only": True,
+                "adopt_on_commit": False,
+            }
+            if self.config.prefill_donor_mode:
+                target_payload["prefill_donor_mode"] = True
             self._post_worker(
                 records,
                 "prepare_decode_migration_target",
                 target,
                 "/pd_flip/migration/target/prepare",
-                {
-                    "session_id": session_id,
-                    "source_url": source.worker_url,
-                    "manifests": manifests,
-                    "prepare_only": True,
-                    "adopt_on_commit": False,
-                },
+                target_payload,
             )
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "target_prepared"
             )
+            if self.config.prefill_donor_mode:
+                donor_metadata = {
+                    "prefill_donor_urls": list(prefill_donor_groups),
+                }
+                self._write_journal_phase(
+                    source,
+                    target,
+                    session_id,
+                    batch_rids,
+                    "prefill_donor_start_intent",
+                    metadata=donor_metadata,
+                )
+                nodes_by_url = {
+                    node.worker_url: node for node in self.config.nodes
+                }
+                for donor_url, donor_manifests in prefill_donor_groups.items():
+                    self._post_worker(
+                        records,
+                        "start_prefill_donor",
+                        nodes_by_url[donor_url],
+                        "/pd_flip/migration/prefill-donor/start",
+                        {
+                            "session_id": session_id,
+                            "manifests": donor_manifests,
+                        },
+                    )
+                self._write_journal_phase(
+                    source,
+                    target,
+                    session_id,
+                    batch_rids,
+                    "prefill_donor_started",
+                    metadata=donor_metadata,
+                )
             self._wait_atomic_initial_transfer(
-                records, source, target, session_id, batch_rids
+                records,
+                source,
+                target,
+                session_id,
+                batch_rids,
+                prefill_donor_groups=prefill_donor_groups,
             )
+            if self.config.prefill_donor_mode:
+                self._write_journal_phase(
+                    source,
+                    target,
+                    session_id,
+                    batch_rids,
+                    "prefill_donor_transferred",
+                    metadata={
+                        "prefill_donor_urls": list(prefill_donor_groups),
+                    },
+                )
             delta_manifests = self._poll_source_delta_manifests(
                 records, source, session_id, batch_rids
             )
@@ -1814,7 +1922,11 @@ class PDFlipController:
                     "abort_intent",
                 )
                 abort_complete = self._abort_two_phase_migration(
-                    source, target, session_id, records
+                    source,
+                    target,
+                    session_id,
+                    records,
+                    prefill_donor_urls=tuple(prefill_donor_groups),
                 )
                 self._write_journal_phase(
                     source,
@@ -1836,10 +1948,15 @@ class PDFlipController:
         target: NodeMetrics,
         session_id: str,
         batch_rids: Sequence[str],
+        *,
+        prefill_donor_groups: Optional[Dict[str, List[JsonDict]]] = None,
     ) -> None:
         deadline = time.monotonic() + self.config.migration_timeout_seconds
         attempted = set()
         last_source = last_target = None
+        last_donors: Dict[str, Any] = {}
+        prefill_donor_groups = prefill_donor_groups or {}
+        nodes_by_url = {node.worker_url: node for node in self.config.nodes}
         while True:
             if time.monotonic() > deadline:
                 raise TimeoutError(
@@ -1860,10 +1977,25 @@ class PDFlipController:
                 target.worker_url,
                 "/pd_flip/migration/status",
             )
+            last_donors = {
+                donor_url: self._record_get(
+                    records,
+                    "wait_prefill_donor",
+                    nodes_by_url[donor_url].name,
+                    donor_url,
+                    "/pd_flip/migration/prefill-donor/status"
+                    f"?session_id={quote(session_id)}",
+                )
+                for donor_url in prefill_donor_groups
+            }
             fallback_rids, reason, status_session = _migration_fallback_request(
                 last_target
             )
             if fallback_rids:
+                if self.config.prefill_donor_mode:
+                    raise RuntimeError(
+                        "target requested source-full fallback in strict Prefill donor mode"
+                    )
                 if status_session and status_session != session_id:
                     raise RuntimeError("fallback status session does not match batch")
                 unknown = set(fallback_rids).difference(map(str, batch_rids))
@@ -1916,9 +2048,22 @@ class PDFlipController:
                 failures.append(f"{source.name}: {_migration_response_error(last_source)}")
             if _migration_response_failed(last_target):
                 failures.append(f"{target.name}: {_migration_response_error(last_target)}")
+            for donor_url, donor_status in last_donors.items():
+                if _migration_response_failed(donor_status):
+                    failures.append(
+                        f"{nodes_by_url[donor_url].name}: "
+                        f"{_migration_response_error(donor_status)}"
+                    )
             if failures:
                 raise RuntimeError("atomic migration failed: " + "; ".join(failures))
-            if _migration_response_complete(last_source) and _migration_response_complete(last_target):
+            if (
+                _migration_response_complete(last_source)
+                and _migration_response_complete(last_target)
+                and all(
+                    _migration_response_complete(status)
+                    for status in last_donors.values()
+                )
+            ):
                 return
             time.sleep(self.config.migration_poll_interval_seconds)
 
@@ -3082,24 +3227,42 @@ class PDFlipController:
         target: NodeMetrics,
         session_id: str,
         records: List[ActionRecord],
+        *,
+        prefill_donor_urls: Sequence[str] = (),
     ) -> bool:
         success = True
-        for node, path, payload in (
+        nodes_by_url = {node.worker_url: node for node in self.config.nodes}
+        abort_targets = [
+            (
+                nodes_by_url[url],
+                "/pd_flip/migration/prefill-donor/abort",
+                {"session_id": session_id, "reason": "monitor aborted preparing"},
+                "abort_prefill_donor",
+            )
+            for url in prefill_donor_urls
+            if url in nodes_by_url
+        ]
+        abort_targets.extend(
+            [
             (
                 target,
                 "/pd_flip/migration/target/abort",
                 {"session_id": session_id, "reason": "monitor aborted preparing"},
+                "abort_decode_migration",
             ),
             (
                 source,
                 "/pd_flip/migration/abort",
                 {"session_id": session_id, "reason": "monitor aborted preparing"},
+                "abort_decode_migration",
             ),
-        ):
+            ]
+        )
+        for node, path, payload, step in abort_targets:
             try:
                 self._post_worker(
                     records,
-                    "abort_decode_migration",
+                    step,
                     node,
                     path,
                     payload,
@@ -4352,6 +4515,7 @@ def config_from_args(args: argparse.Namespace) -> PDClusterConfig:
         min_decode_slo_samples=args.min_decode_slo_samples,
         session_journal_path=args.session_journal_path,
         session_id_prefix=getattr(args, "session_id_prefix", None),
+        prefill_donor_mode=bool(getattr(args, "prefill_donor_mode", False)),
     )
 
 
@@ -4389,6 +4553,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-decode-slo-samples", type=int, default=20)
     parser.add_argument("--session-journal-path", default="pd_flip_session.json")
     parser.add_argument("--session-id-prefix", default=None)
+    parser.add_argument("--prefill-donor-mode", action="store_true")
 
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("metrics", help="Collect router/worker metrics")

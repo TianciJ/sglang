@@ -172,6 +172,45 @@ def test_progressive_config_defaults_and_from_dict_values():
     assert configured.session_journal_path == "state/session.json"
 
 
+def test_prefill_donor_host_resolution_requires_exact_unique_node():
+    config = controller_module.PDClusterConfig(
+        router_url="http://router",
+        nodes=[
+            controller_module.PDNode("p0", "http://10.0.0.1:30000", "p0"),
+            controller_module.PDNode("p1", "http://10.0.0.2:30000", "p1"),
+        ],
+        prefill_donor_mode=True,
+    )
+    controller = controller_module.PDFlipController(config, client=object())
+    groups = controller._resolve_prefill_donor_groups(
+        [
+            {"rid": "r0", "prefill_donor_host": "10.0.0.1", "prefill_donor_end": 64},
+            {"rid": "r1", "prefill_donor_host": "10.0.0.2", "prefill_donor_end": 64},
+        ]
+    )
+
+    assert {url: [item["rid"] for item in manifests] for url, manifests in groups.items()} == {
+        "http://10.0.0.1:30000": ["r0"],
+        "http://10.0.0.2:30000": ["r1"],
+    }
+
+    ambiguous = controller_module.PDFlipController(
+        controller_module.PDClusterConfig(
+            router_url="http://router",
+            nodes=[
+                controller_module.PDNode("p0", "http://10.0.0.1:30000", "p0"),
+                controller_module.PDNode("p1", "http://10.0.0.1:30001", "p1"),
+            ],
+            prefill_donor_mode=True,
+        ),
+        client=object(),
+    )
+    with pytest.raises(RuntimeError, match="ambiguous original Prefill donor"):
+        ambiguous._resolve_prefill_donor_groups(
+            [{"rid": "r0", "prefill_donor_host": "10.0.0.1", "prefill_donor_end": 64}]
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -537,6 +576,143 @@ def progressive_scenario(
     )
     controller = controller_module.PDFlipController(config, client)
     return controller, client, ProgressiveScenarioMonitor(observation)
+
+
+class PrefillDonorScenarioClient(ProgressiveScenarioClient):
+    def get_json(self, base_url, path):
+        if path.startswith("/pd_flip/migration/prefill-donor/status"):
+            self.steps.append("prefill_donor_ready")
+            return {
+                "success": True,
+                "status": {
+                    "state": "prefill_donor_transferred",
+                    "pending_reqs": 0,
+                    "failed_reqs": 0,
+                },
+            }
+        return super().get_json(base_url, path)
+
+    def post_json(self, base_url, path, payload):
+        if path == "/pd_flip/migration/source/start":
+            self.posts.append((base_url, path, dict(payload)))
+            self.steps.append("source_start")
+            manifests = [
+                {
+                    "rid": rid,
+                    "prefill_donor_host": "prefill",
+                    "prefill_donor_port": 8998,
+                    "prefill_donor_bootstrap_room": 1700 + index,
+                    "prefill_donor_end": 1920,
+                    "source_decode_start": 1920,
+                    "origin_input_ids": list(range(1974)),
+                    "kv_committed_len": 2000,
+                }
+                for index, rid in enumerate(payload["rids"])
+            ]
+            self.sessions[payload["session_id"]] = manifests
+            return {"success": True, "manifests": manifests}
+        if path == "/pd_flip/migration/prefill-donor/start":
+            self.posts.append((base_url, path, dict(payload)))
+            self.steps.append("prefill_donor_start")
+            return {"success": True}
+        if path == "/pd_flip/migration/prefill-donor/abort":
+            self.posts.append((base_url, path, dict(payload)))
+            self.steps.append("prefill_donor_abort")
+            return {"success": True}
+        return super().post_json(base_url, path, payload)
+
+
+def test_atomic_batch_waits_for_original_prefill_donor_before_delta():
+    client = PrefillDonorScenarioClient(running_rids=["r0"], delta_pending_once=False)
+    config = controller_module.PDClusterConfig(
+        router_url="http://router",
+        nodes=[
+            controller_module.PDNode("source", "http://source", "source"),
+            controller_module.PDNode("target", "http://target", "target"),
+            controller_module.PDNode("prefill", "http://prefill", "prefill"),
+        ],
+        migration_poll_interval_seconds=0.0,
+        observation_seconds=0.0,
+        prefill_donor_mode=True,
+    )
+    controller = controller_module.PDFlipController(config, client)
+    source = controller_module.NodeMetrics("source", "http://source", "source")
+    target = controller_module.NodeMetrics("target", "http://target", "target")
+
+    migrated = controller._execute_atomic_batch(
+        source,
+        target,
+        "donor-session",
+        ["r0"],
+        False,
+        next_fsm_phase="observing",
+        records=[],
+    )
+
+    assert migrated == ("r0",)
+    assert client.steps.index("target_prepare") < client.steps.index(
+        "prefill_donor_start"
+    ) < client.steps.index("prefill_donor_ready") < client.steps.index(
+        "source_delta"
+    )
+    assert "source_fallback" not in client.steps
+    source_payload = next(
+        payload for _, path, payload in client.posts if path.endswith("/source/start")
+    )
+    target_payload = next(
+        payload for _, path, payload in client.posts if path.endswith("/target/prepare")
+    )
+    assert source_payload["prefill_donor_mode"] is True
+    assert target_payload["prefill_donor_mode"] is True
+
+
+def test_prefill_donor_failure_aborts_all_three_parties_without_fallback():
+    class FailedDonorClient(PrefillDonorScenarioClient):
+        def get_json(self, base_url, path):
+            if path.startswith("/pd_flip/migration/prefill-donor/status"):
+                return {
+                    "success": True,
+                    "status": {
+                        "state": "prefill_donor_failed",
+                        "pending_reqs": 0,
+                        "failed_reqs": 1,
+                        "last_error": "prefill_donor_incomplete",
+                    },
+                }
+            return super().get_json(base_url, path)
+
+    client = FailedDonorClient(running_rids=["r0"], delta_pending_once=False)
+    controller = controller_module.PDFlipController(
+        controller_module.PDClusterConfig(
+            router_url="http://router",
+            nodes=[
+                controller_module.PDNode("source", "http://source", "source"),
+                controller_module.PDNode("target", "http://target", "target"),
+                controller_module.PDNode("prefill", "http://prefill", "prefill"),
+            ],
+            migration_poll_interval_seconds=0.0,
+            prefill_donor_mode=True,
+        ),
+        client,
+    )
+    source = controller_module.NodeMetrics("source", "http://source", "source")
+    target = controller_module.NodeMetrics("target", "http://target", "target")
+
+    with pytest.raises(controller_module.ProgressiveAtomicBatchError, match="incomplete"):
+        controller._execute_atomic_batch(
+            source,
+            target,
+            "donor-failed",
+            ["r0"],
+            False,
+            next_fsm_phase="observing",
+            records=[],
+        )
+
+    assert "prefill_donor_abort" in client.steps
+    assert client.steps.count("abort") == 2
+    assert "source_fallback" not in client.steps
+    assert "source_delta" not in client.steps
 
 
 def test_progressive_flow_recovers_after_first_batch():

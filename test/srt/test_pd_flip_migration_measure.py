@@ -206,6 +206,29 @@ class PDFlipMigrationMeasureTest(unittest.TestCase):
             }.issubset(controller_state_fields())
         )
 
+    def test_prefill_donor_provenance_fields_have_stable_schema(self):
+        from scripts.playground.disaggregation.pd_flip_migration_measure import (
+            migration_request_fields,
+        )
+
+        self.assertTrue(
+            {
+                "prompt_len",
+                "prefill_donor_end",
+                "source_decode_start",
+                "prefill_donor_host",
+                "prefill_donor_restore_hit_len",
+                "prefill_donor_pages",
+                "prefill_donor_transfer_bytes",
+                "prefill_donor_restore_seconds",
+                "prefill_donor_transfer_seconds",
+                "source_base_pages",
+                "source_base_transfer_bytes",
+                "target_prefix_match_skipped",
+                "provenance_mode",
+            }.issubset(migration_request_fields())
+        )
+
     def test_build_timeline_detects_migration_link_stages(self):
         from scripts.playground.disaggregation.pd_flip_migration_measure import (
             build_timeline,
