@@ -60,6 +60,10 @@ if [[ "${ENABLE_PD_FLIP_HICACHE_STITCH:-1}" == "1" ]]; then
   )
 fi
 
+if [[ "${ENABLE_PD_FLIP_PREFILL_DONOR:-0}" == "1" ]]; then
+  server_args+=(--enable-pd-flip-prefill-donor)
+fi
+
 server_args+=(--admin-api-key "${ADMIN_API_KEY}")
 
 if [[ -n "${EXTRA_SGLANG_ARGS:-}" ]]; then

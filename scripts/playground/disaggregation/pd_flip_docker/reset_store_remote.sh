@@ -39,7 +39,7 @@ rm -rf "$health_dir"
 mkdir -p "$health_dir"
 nohup env \
   MOONCAKE_LOCAL_HOSTNAME="${MOONCAKE_MASTER%:*}" \
-  MOONCAKE_GLOBAL_SEGMENT_SIZE=4gb \
+  MOONCAKE_GLOBAL_SEGMENT_SIZE="${MOONCAKE_STORE_SEGMENT_SIZE:-64gb}" \
   MOONCAKE_LOCAL_BUFFER_SIZE=0 \
   python3 -m mooncake.mooncake_store_service --port="$MOONCAKE_STORE_PORT" \
   >"$state_dir/store.log" 2>&1 &

@@ -219,6 +219,25 @@ def test_worker_and_controller_forward_the_deployment_contract():
         assert flag in controller
 
 
+def test_prefill_donor_experiment_flags_and_store_capacity_contract():
+    reset_store = read(HARNESS / "reset_store_remote.sh")
+    worker = read(HARNESS / "run_worker.sh")
+    controller = read(HARNESS / "run_controller.sh")
+    env_example = read(HARNESS / "env.example")
+
+    assert '${MOONCAKE_STORE_SEGMENT_SIZE:-64gb}' in reset_store
+    assert "ENABLE_PD_FLIP_PREFILL_DONOR" in worker
+    assert "--enable-pd-flip-prefill-donor" in worker
+    assert "PD_FLIP_PREFILL_DONOR_MODE" in controller
+    assert "--prefill-donor-mode" in controller
+    for variable in (
+        "MOONCAKE_STORE_SEGMENT_SIZE=64gb",
+        "ENABLE_PD_FLIP_PREFILL_DONOR=1",
+        "PD_FLIP_PREFILL_DONOR_MODE=1",
+    ):
+        assert variable in env_example
+
+
 def test_harnesses_fail_closed_for_empty_or_placeholder_admin_keys(tmp_path):
     for script, args in (
         ("run_worker.sh", ("decode", "0.0.0.0")),

@@ -1973,6 +1973,9 @@ class Scheduler(
     def start_pd_flip_migration_source(
         self, recv_req: PDFlipMigrationSourceStartReq
     ) -> PDFlipMigrationReqOutput:
+        prefill_donor_mode = bool(
+            getattr(recv_req, "prefill_donor_mode", False)
+        )
         existing = getattr(self, "pd_flip_migration_session", None)
         if existing:
             matches = (
@@ -2010,7 +2013,7 @@ class Scheduler(
                 message=f"source migration requires decode role, got {role}",
                 status=self._pd_flip_migration_status_dict(),
             )
-        if recv_req.prefill_donor_mode and not getattr(
+        if prefill_donor_mode and not getattr(
             self.server_args, "enable_pd_flip_prefill_donor", False
         ):
             return PDFlipMigrationReqOutput(
@@ -2081,7 +2084,7 @@ class Scheduler(
                     8998,
                 )
             )
-            if recv_req.prefill_donor_mode:
+            if prefill_donor_mode:
                 self._pd_flip_apply_prefill_donor_manifest(req, manifest)
             manifests.append(manifest)
             migration_reqs.append(req)
@@ -2102,7 +2105,7 @@ class Scheduler(
                     8998,
                 )
             )
-            if recv_req.prefill_donor_mode:
+            if prefill_donor_mode:
                 self._pd_flip_apply_prefill_donor_manifest(req, manifest)
             manifests.append(manifest)
             migration_reqs.append(req)
@@ -2139,7 +2142,7 @@ class Scheduler(
             "source_entries": real_entries,
             "source_waiting_reqs": source_waiting_reqs,
             "timing_debug": timing_debug,
-            "prefill_donor_mode": bool(recv_req.prefill_donor_mode),
+            "prefill_donor_mode": prefill_donor_mode,
         }
         self.pd_flip_migration_session = session
         if real_entries:
@@ -2157,6 +2160,9 @@ class Scheduler(
     def prepare_pd_flip_migration_target(
         self, recv_req: PDFlipMigrationTargetPrepareReq
     ) -> PDFlipMigrationReqOutput:
+        prefill_donor_mode = bool(
+            getattr(recv_req, "prefill_donor_mode", False)
+        )
         existing = getattr(self, "pd_flip_migration_session", None)
         if existing:
             matches = (
@@ -2193,7 +2199,7 @@ class Scheduler(
                 message=f"target migration requires decode role, got {role}",
                 status=self._pd_flip_migration_status_dict(),
             )
-        if recv_req.prefill_donor_mode and not getattr(
+        if prefill_donor_mode and not getattr(
             self.server_args, "enable_pd_flip_prefill_donor", False
         ):
             return PDFlipMigrationReqOutput(
@@ -2218,11 +2224,16 @@ class Scheduler(
             manifest["pd_flip_session_id"] = session_id
         timing_debug = {"manifest_count": len(manifests)}
         entry_started = time.monotonic()
-        target_entries, real_error = self._pd_flip_prepare_target_entries(
-            manifests,
-            recv_req.source_url,
-            prefill_donor_mode=bool(recv_req.prefill_donor_mode),
-        )
+        if prefill_donor_mode:
+            target_entries, real_error = self._pd_flip_prepare_target_entries(
+                manifests,
+                recv_req.source_url,
+                prefill_donor_mode=True,
+            )
+        else:
+            target_entries, real_error = self._pd_flip_prepare_target_entries(
+                manifests, recv_req.source_url
+            )
         timing_debug["prepare_target_entries_s"] = time.monotonic() - entry_started
         self.pd_flip_migration_session = {
             "session_id": session_id,
@@ -2242,7 +2253,7 @@ class Scheduler(
             "held_reqs": 0,
             "target_entries": target_entries,
             "timing_debug": timing_debug,
-            "prefill_donor_mode": bool(recv_req.prefill_donor_mode),
+            "prefill_donor_mode": prefill_donor_mode,
         }
         if target_entries:
             self._pd_flip_target_pump_transfer(self.pd_flip_migration_session)
