@@ -86,6 +86,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
                 forced_text="字",
                 forced_token_id=2024,
                 custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
             )
 
             scheduled = [json.loads(line) for line in output.read_text().splitlines()]
@@ -105,6 +106,14 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             )
             self.assertTrue(
                 all(
+                    row["model"]
+                    == row["body"]["model"]
+                    == "deepseek_v3.1_terminus"
+                    for row in scheduled
+                )
+            )
+            self.assertTrue(
+                all(
                     row["body"]["custom_params"]["forced_token_id"] == 2024
                     for row in scheduled
                 )
@@ -113,6 +122,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             self.assertEqual(schedule["request_count"], 40)
             self.assertEqual(schedule["max_tokens"], 10000)
             self.assertEqual(schedule["forced_token_id"], 2024)
+            self.assertEqual(schedule["model"], "deepseek_v3.1_terminus")
 
     def test_env_example_points_at_current_cluster_layout(self):
         source = ENV_EXAMPLE.read_text(encoding="utf-8")
@@ -128,6 +138,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
         self.assertIn("TRACE_MAX_TOKENS=10000", source)
         self.assertIn("TRACE_FORCED_TEXT=字", source)
         self.assertIn("MODEL_PATH=/models/deepseek_v3.1_terminus", source)
+        self.assertIn("MODEL_ID=deepseek_v3.1_terminus", source)
         self.assertIn("TP_SIZE=8", source)
         self.assertIn("DP_SIZE=8", source)
         self.assertIn("ENABLE_CUSTOM_LOGIT_PROCESSOR=1", source)
@@ -156,6 +167,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             "set -Eeuo pipefail",
             "--output-dir '${RUN_DIR}/workload'",
             "--ttft-slo-override-seconds",
+            "--model '${MODEL_ID}'",
             "len(rows) == 40",
             "prompt_chars",
             "ttft_slo_s",

@@ -65,8 +65,11 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
             forced_text="字",
             forced_token_id=2024,
             custom_logit_processor="serialized-processor",
+            model="deepseek_v3.1_terminus",
         )
 
+        self.assertEqual(row["model"], "deepseek_v3.1_terminus")
+        self.assertEqual(row["body"]["model"], "deepseek_v3.1_terminus")
         self.assertEqual(row["max_tokens"], 10000)
         self.assertTrue(row["stream"])
         self.assertEqual(row["body"]["max_tokens"], 10000)
@@ -100,6 +103,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 forced_text="",
                 forced_token_id=2024,
                 custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
             )
         with self.assertRaisesRegex(ValueError, "custom_logit_processor"):
             apply_output_contract(
@@ -141,6 +145,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 forced_text="字",
                 forced_token_id=2024,
                 custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
             )
         rows[17]["body"]["max_tokens"] = 9999
 
@@ -151,6 +156,35 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 forced_text="字",
                 forced_token_id=2024,
                 custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
+            )
+
+    def test_validate_output_contract_rejects_model_mismatch(self):
+        from scripts.playground.disaggregation.pd_flip_prepare_trace import (
+            _validate_output_contract,
+            apply_output_contract,
+        )
+
+        rows = self._source_rows()
+        for row in rows:
+            apply_output_contract(
+                row,
+                max_tokens=10000,
+                forced_text="字",
+                forced_token_id=2024,
+                custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
+            )
+        rows[17]["body"]["model"] = "Qwen3-8B"
+
+        with self.assertRaisesRegex(ValueError, "model"):
+            _validate_output_contract(
+                rows,
+                max_tokens=10000,
+                forced_text="字",
+                forced_token_id=2024,
+                custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
             )
 
     def test_prepare_trace_applies_forced_output_contract_to_all_rows(self):
@@ -179,6 +213,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 forced_text="字",
                 forced_token_id=2024,
                 custom_logit_processor="serialized-processor",
+                model="deepseek_v3.1_terminus",
             )
 
             rows = [
@@ -188,6 +223,12 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
             schedule = json.loads(manifest.read_text(encoding="utf-8"))
 
         self.assertEqual(len(rows), 40)
+        self.assertTrue(
+            all(
+                row["model"] == row["body"]["model"] == "deepseek_v3.1_terminus"
+                for row in rows
+            )
+        )
         self.assertTrue(
             all(row["max_tokens"] == row["body"]["max_tokens"] == 10000 for row in rows)
         )
@@ -203,6 +244,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         self.assertEqual(schedule["max_tokens"], 10000)
         self.assertEqual(schedule["forced_text"], "字")
         self.assertEqual(schedule["forced_token_id"], 2024)
+        self.assertEqual(schedule["model"], "deepseek_v3.1_terminus")
 
     def test_cli_requires_deepseek_output_contract_inputs(self):
         from scripts.playground.disaggregation.pd_flip_prepare_trace import (
@@ -229,12 +271,15 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 "字",
                 "--tokenizer-path",
                 "/models/deepseek_v3.1_terminus",
+                "--model",
+                "deepseek_v3.1_terminus",
             ]
         )
 
         self.assertEqual(args.max_tokens, 10000)
         self.assertEqual(args.forced_text, "字")
         self.assertEqual(str(args.tokenizer_path), "/models/deepseek_v3.1_terminus")
+        self.assertEqual(args.model, "deepseek_v3.1_terminus")
 
 
 if __name__ == "__main__":

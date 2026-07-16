@@ -54,6 +54,7 @@ TRACE_TTFT_SLO_OVERRIDE_SECONDS="${TRACE_TTFT_SLO_OVERRIDE_SECONDS:-0}"
 TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
 TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-字}"
 MODEL_PATH="${MODEL_PATH:-/models/deepseek_v3.1_terminus}"
+MODEL_ID="${MODEL_ID:-deepseek_v3.1_terminus}"
 TP_SIZE="${TP_SIZE:-8}"
 DP_SIZE="${DP_SIZE:-8}"
 ENABLE_CUSTOM_LOGIT_PROCESSOR="${ENABLE_CUSTOM_LOGIT_PROCESSOR:-1}"
@@ -152,6 +153,10 @@ validate_execution_layout() {
     echo "TRACE_FORCED_TEXT must be nonempty" >&2
     return 2
   fi
+  if [[ -z "${MODEL_ID}" ]]; then
+    echo "MODEL_ID must be nonempty" >&2
+    return 2
+  fi
   if [[ "${TP_SIZE}" != "8" || "${DP_SIZE}" != "8" ]]; then
     echo "DeepSeek PD Flip requires TP_SIZE=8 and DP_SIZE=8" >&2
     return 2
@@ -232,7 +237,7 @@ capture_clocks() {
 
 prepare_scheduled_trace() {
   # prepare-trace-in-container: host Python on the ECS nodes is too old.
-  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/trace'; docker run --rm -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v /home/tiancij:/home/tiancij '${IMAGE}' python3 /sgl-workspace/sglang/scripts/playground/disaggregation/pd_flip_prepare_trace.py --source '${TRACE_PATH}' --output '${EFFECTIVE_TRACE}' --manifest '${RUN_DIR}/trace/schedule.json' --wave-size '${TRACE_WAVE_SIZE}' --wave-gap-seconds '${TRACE_WAVE_GAP_SECONDS}' --intra-wave-interval-seconds '${TRACE_INTRA_WAVE_INTERVAL_SECONDS}' --ttft-slo-override-seconds '${TRACE_TTFT_SLO_OVERRIDE_SECONDS}' --max-tokens '${TRACE_MAX_TOKENS}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}'; sha256sum '${TRACE_PATH}' > '${RUN_DIR}/trace/source.sha256'; sha256sum '${EFFECTIVE_TRACE}' > '${RUN_DIR}/trace/effective.sha256'"
+  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/trace'; docker run --rm -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v /home/tiancij:/home/tiancij '${IMAGE}' python3 /sgl-workspace/sglang/scripts/playground/disaggregation/pd_flip_prepare_trace.py --source '${TRACE_PATH}' --output '${EFFECTIVE_TRACE}' --manifest '${RUN_DIR}/trace/schedule.json' --wave-size '${TRACE_WAVE_SIZE}' --wave-gap-seconds '${TRACE_WAVE_GAP_SECONDS}' --intra-wave-interval-seconds '${TRACE_INTRA_WAVE_INTERVAL_SECONDS}' --ttft-slo-override-seconds '${TRACE_TTFT_SLO_OVERRIDE_SECONDS}' --max-tokens '${TRACE_MAX_TOKENS}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --model '${MODEL_ID}'; sha256sum '${TRACE_PATH}' > '${RUN_DIR}/trace/source.sha256'; sha256sum '${EFFECTIVE_TRACE}' > '${RUN_DIR}/trace/effective.sha256'"
 }
 
 start_shared_stack() {

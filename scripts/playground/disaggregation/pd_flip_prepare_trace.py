@@ -41,6 +41,7 @@ def apply_output_contract(
     forced_text: str,
     forced_token_id: int,
     custom_logit_processor: str,
+    model: str | None = None,
 ) -> None:
     if max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
@@ -52,6 +53,11 @@ def apply_output_contract(
         raise ValueError("custom_logit_processor must be nonempty")
 
     body = row.setdefault("body", {})
+    if model is not None:
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be nonempty")
+        row["model"] = model
+        body["model"] = model
     custom_params = body.setdefault("custom_params", {})
     row["max_tokens"] = max_tokens
     row["stream"] = True
@@ -106,10 +112,15 @@ def _validate_output_contract(
     forced_text: str,
     forced_token_id: int,
     custom_logit_processor: str,
+    model: str | None = None,
 ) -> None:
     for index, row in enumerate(rows):
         body = row.get("body") or {}
         custom_params = body.get("custom_params") or {}
+        if model is not None and (
+            row.get("model") != model or body.get("model") != model
+        ):
+            raise ValueError(f"request {index} model contract mismatch")
         if row.get("max_tokens") != max_tokens or body.get("max_tokens") != max_tokens:
             raise ValueError(f"request {index} max_tokens contract mismatch")
         if row.get("stream") is not True or body.get("stream") is not True:
@@ -140,6 +151,7 @@ def prepare_trace(
     forced_text: str | None = None,
     forced_token_id: int | None = None,
     custom_logit_processor: str | None = None,
+    model: str | None = None,
 ) -> None:
     if wave_size <= 0:
         raise ValueError("wave_size must be positive")
@@ -165,6 +177,7 @@ def prepare_trace(
                     forced_token_id if forced_token_id is not None else -1
                 ),
                 custom_logit_processor=custom_logit_processor or "",
+                model=model,
             )
         scheduled_rows.append(scheduled)
 
@@ -190,6 +203,7 @@ def prepare_trace(
             forced_text=forced_text or "",
             forced_token_id=(forced_token_id if forced_token_id is not None else -1),
             custom_logit_processor=custom_logit_processor or "",
+            model=model,
         )
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
@@ -208,6 +222,7 @@ def prepare_trace(
                 "max_tokens": max_tokens,
                 "forced_text": forced_text,
                 "forced_token_id": forced_token_id,
+                "model": model,
             },
             indent=2,
             sort_keys=True,
@@ -229,6 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, required=True)
     parser.add_argument("--forced-text", required=True)
     parser.add_argument("--tokenizer-path", type=Path, required=True)
+    parser.add_argument("--model", required=True)
     return parser
 
 
@@ -261,6 +277,7 @@ def main() -> None:
         forced_text=args.forced_text,
         forced_token_id=forced_token_id,
         custom_logit_processor=custom_logit_processor,
+        model=args.model,
     )
 
 
