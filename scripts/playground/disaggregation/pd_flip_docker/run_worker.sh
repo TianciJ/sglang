@@ -68,8 +68,6 @@ if [[ "${ENABLE_PD_FLIP_PREFILL_DONOR:-0}" == "1" ]]; then
   server_args+=(--enable-pd-flip-prefill-donor)
 fi
 
-server_args+=(--admin-api-key "${ADMIN_API_KEY}")
-
 if [[ -n "${EXTRA_SGLANG_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
   extra_args=(${EXTRA_SGLANG_ARGS})
@@ -77,10 +75,13 @@ if [[ -n "${EXTRA_SGLANG_ARGS:-}" ]]; then
 fi
 
 printf -v server_cmd '%q ' "${server_args[@]}"
-launch_cmd="cd /sgl-workspace/sglang && PYTHONPATH=python exec ${server_cmd}"
+launch_cmd="cd /sgl-workspace/sglang && PYTHONPATH=python exec ${server_cmd}--admin-api-key \"\${ADMIN_API_KEY}\""
 
 # shellcheck disable=SC2206
 extra_docker_args=(${EXTRA_DOCKER_ARGS:-})
+if [[ "${EXTRA_DOCKER_ARGS:-}" != *"ADMIN_API_KEY"* ]]; then
+  extra_docker_args+=(-e ADMIN_API_KEY)
+fi
 for name in \
   MOONCAKE_MASTER \
   MOONCAKE_TE_META_DATA_SERVER \
@@ -98,7 +99,23 @@ if [[ "${EXTRA_DOCKER_ARGS:-}" != *"MOONCAKE_LOCAL_HOSTNAME"* ]]; then
   fi
 fi
 
-exec docker run --rm \
+docker_action=(run --rm)
+if [[ -n "${PD_FLIP_WORKER_CONTAINER_NAME:-}" ]]; then
+  if [[ ! "${PD_FLIP_WORKER_CONTAINER_NAME}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    echo "PD_FLIP_WORKER_CONTAINER_NAME is invalid" >&2
+    exit 2
+  fi
+  if [[ "${PD_FLIP_WORKER_CREATE_ONLY:-0}" == "1" ]]; then
+    docker_action=(create --name "${PD_FLIP_WORKER_CONTAINER_NAME}")
+  else
+    docker_action=(run --rm --name "${PD_FLIP_WORKER_CONTAINER_NAME}")
+  fi
+elif [[ "${PD_FLIP_WORKER_CREATE_ONLY:-0}" == "1" ]]; then
+  echo "PD_FLIP_WORKER_CONTAINER_NAME is required in create-only mode" >&2
+  exit 2
+fi
+
+exec docker "${docker_action[@]}" \
   --gpus all \
   --network host \
   --ipc host \

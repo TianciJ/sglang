@@ -272,7 +272,9 @@ def test_valid_admin_key_is_forwarded_to_worker_controller_and_router(tmp_path):
     router = run_harness(tmp_path / "router", "run_router.sh", admin_key="secret")
     for result in (worker, controller, router):
         assert result.returncode == 0, result.stderr
-    assert "--admin-api-key secret" in worker.stdout
+    assert "--admin-api-key" in worker.stdout
+    assert "secret" not in worker.stdout
+    assert "ARG=-e\nARG=ADMIN_API_KEY" in worker.stdout
     assert "--tp-size 1" in worker.stdout
     assert "--dp-size 1" in worker.stdout
     assert "--enable-dp-attention" in worker.stdout
@@ -280,6 +282,23 @@ def test_valid_admin_key_is_forwarded_to_worker_controller_and_router(tmp_path):
     assert "ARG=--api-key\nARG=secret" in controller.stdout
     assert "secret" not in router.stdout
     assert "ARG=-e\nARG=PD_FLIP_ROUTER_ADMIN_API_KEY" in router.stdout
+
+
+def test_worker_can_create_a_named_stopped_experiment_container(tmp_path):
+    result = run_harness(
+        tmp_path,
+        "run_worker.sh",
+        "prefill",
+        "0.0.0.0",
+        admin_key="secret",
+        PD_FLIP_WORKER_CREATE_ONLY=1,
+        PD_FLIP_WORKER_CONTAINER_NAME="tiancij-pd-node0",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("ARG=create\n")
+    assert "ARG=--name\nARG=tiancij-pd-node0" in result.stdout
+    assert "ARG=--rm" not in result.stdout
 
 
 def test_router_rejects_a_key_the_controller_cannot_use(tmp_path):
