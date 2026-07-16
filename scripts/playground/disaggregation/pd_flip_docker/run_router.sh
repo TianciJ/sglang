@@ -163,8 +163,12 @@ if [[ "${cargo_offline}" == "auto" ]]; then
   fi
 fi
 
-cargo_fetch_args=(fetch -vv --locked)
-cargo_run_args=(run --release --locked)
+cargo_fetch_args=(fetch -vv)
+cargo_run_args=(run --release)
+if [[ -f Cargo.lock ]]; then
+  cargo_fetch_args+=(--locked)
+  cargo_run_args+=(--locked)
+fi
 if [[ "${cargo_offline}" == "1" || "${cargo_offline}" == "true" ]]; then
   export CARGO_NET_OFFLINE=true
   cargo_fetch_args+=(--offline)

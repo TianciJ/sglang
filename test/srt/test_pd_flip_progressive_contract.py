@@ -313,6 +313,14 @@ def test_router_can_use_a_named_deepseek_container(tmp_path):
     assert "ARG=--name\nARG=tiancij-pd-dsv3-router" in result.stdout
 
 
+def test_router_only_requires_locked_cargo_when_lockfile_exists():
+    source = read(HARNESS / "run_router.sh")
+
+    assert "if [[ -f Cargo.lock ]]; then" in source
+    assert "cargo_fetch_args+=(--locked)" in source
+    assert "cargo_run_args+=(--locked)" in source
+
+
 def test_router_rejects_a_key_the_controller_cannot_use(tmp_path):
     result = run_harness(
         tmp_path,
