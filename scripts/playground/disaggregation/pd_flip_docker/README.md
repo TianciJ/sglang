@@ -72,8 +72,10 @@ esac
 ```
 
 Set the same `MODEL_PATH`, `MODEL_ID`, `TOKENIZER_PATH`, node URLs, Mooncake
-addresses, TP/DP sizes, and `ADMIN_API_KEY` everywhere. Keep
-`TP_SIZE * DP_SIZE == 8`. The checked-in progressive defaults are:
+addresses, TP/DP sizes, and `ADMIN_API_KEY` everywhere. For DeepSeek MLA on
+an eight-GPU node, use `TP_SIZE=8` and `DP_SIZE=8`: Attention DP partitions
+the eight TP ranks and does not request 64 GPUs. The checked-in progressive
+defaults are:
 
 ```text
 PD_FLIP_FIRST_MIGRATION_RATIO=0.5

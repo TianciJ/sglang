@@ -53,6 +53,9 @@ TRACE_TTFT_SLO_OVERRIDE_SECONDS="${TRACE_TTFT_SLO_OVERRIDE_SECONDS:-0}"
 TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
 TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-字}"
 MODEL_PATH="${MODEL_PATH:-/models/deepseek_v3.1_terminus}"
+TP_SIZE="${TP_SIZE:-8}"
+DP_SIZE="${DP_SIZE:-8}"
+ENABLE_CUSTOM_LOGIT_PROCESSOR="${ENABLE_CUSTOM_LOGIT_PROCESSOR:-1}"
 WORKLOAD_TIMEOUT_SECONDS="${WORKLOAD_TIMEOUT_SECONDS:-7200}"
 MEASUREMENT_DURATION_SECONDS="${MEASUREMENT_DURATION_SECONDS:-7200}"
 SSH_OPTIONS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
@@ -148,6 +151,14 @@ validate_execution_layout() {
     echo "TRACE_FORCED_TEXT must be nonempty" >&2
     return 2
   fi
+  if [[ "${TP_SIZE}" != "8" || "${DP_SIZE}" != "8" ]]; then
+    echo "DeepSeek PD Flip requires TP_SIZE=8 and DP_SIZE=8" >&2
+    return 2
+  fi
+  if [[ "${ENABLE_CUSTOM_LOGIT_PROCESSOR}" != "1" ]]; then
+    echo "ENABLE_CUSTOM_LOGIT_PROCESSOR=1 is required by the forced trace" >&2
+    return 2
+  fi
   if ! node_is_configured "${SOURCE_NAME}"; then
     echo "unknown PD_FLIP_SOURCE_NAME: ${SOURCE_NAME}" >&2
     return 2
@@ -182,7 +193,7 @@ preflight() {
   remote "${HOSTS[0]}" "python3 -c \"import json; rows=[json.loads(line) for line in open('${TRACE_PATH}', encoding='utf-8') if line.strip()]; assert len(rows) == 40; assert [row.get('prompt_kind') for row in rows] == ['long','short'] * 20; assert sum(row.get('prompt_chars') == 10000 for row in rows) == 20; assert sum(row.get('prompt_chars') == 1000 for row in rows) == 20; assert all(float(row.get('ttft_slo_s', 0)) > 0 and float(row.get('tpot_slo_s', 0)) > 0 for row in rows)\""
   if [[ "${DRY_RUN}" != "1" ]]; then
     for i in "${!HOSTS[@]}"; do
-      remote "${HOSTS[$i]}" "docker inspect '${WORKER_CONTAINERS[$i]}' --format '{{json .Config.Cmd}}' | python3 -c \"import base64,json,sys; cmd=' '.join(json.load(sys.stdin)); parts=cmd.split(); pos=parts.index('echo') if 'echo' in parts else -1; decoded=base64.b64decode(parts[pos + 1]).decode('utf-8') if pos >= 0 and len(parts) > pos + 1 else cmd; assert '--enable-pd-flip-hicache-stitch' in decoded; assert '--enable-pd-flip-prefill-donor' in decoded\""
+      remote "${HOSTS[$i]}" "docker inspect '${WORKER_CONTAINERS[$i]}' --format '{{json .Config.Cmd}}' | python3 -c \"import base64,json,sys; cmd=' '.join(json.load(sys.stdin)); parts=cmd.split(); pos=parts.index('echo') if 'echo' in parts else -1; decoded=base64.b64decode(parts[pos + 1]).decode('utf-8') if pos >= 0 and len(parts) > pos + 1 else cmd; assert '--enable-pd-flip-hicache-stitch' in decoded; assert '--enable-pd-flip-prefill-donor' in decoded; assert '--tp-size 8' in decoded; assert '--dp-size 8' in decoded; assert '--enable-dp-attention' in decoded; assert '--enable-custom-logit-processor' in decoded; assert '--model-path ${MODEL_PATH}' in decoded\""
       remote "${HOSTS[$i]}" "docker inspect '${WORKER_CONTAINERS[$i]}' --format '{{range .Mounts}}{{println .Source .Destination}}{{end}}' | grep -Fq '${SGLANG_REPO} /sgl-workspace/sglang'"
     done
     local hash_file_args reference_hash node_hash

@@ -32,8 +32,8 @@ server_args=(
   --model-path "${MODEL_PATH}"
   --host "${LOCAL_IP}"
   --port "${PORT}"
-  --tp "${TP_SIZE}"
-  --dp "${DP_SIZE}"
+  --tp-size "${TP_SIZE}"
+  --dp-size "${DP_SIZE}"
   --enable-dp-attention
   --disaggregation-mode "${ROLE}"
   --disaggregation-transfer-backend "${TRANSFER_BACKEND}"
@@ -41,6 +41,10 @@ server_args=(
   --disaggregation-ib-device "${IB_DEVICE}"
   --mem-fraction-static "${MEM_FRACTION_STATIC}"
 )
+
+if [[ "${ENABLE_CUSTOM_LOGIT_PROCESSOR:-0}" == "1" ]]; then
+  server_args+=(--enable-custom-logit-processor)
+fi
 
 if [[ "${ENABLE_PD_FLIP_STATE_MACHINE:-1}" == "1" ]]; then
   server_args+=(--enable-pd-flip-state-machine)

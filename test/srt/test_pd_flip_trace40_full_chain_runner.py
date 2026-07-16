@@ -128,6 +128,9 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
         self.assertIn("TRACE_MAX_TOKENS=10000", source)
         self.assertIn("TRACE_FORCED_TEXT=字", source)
         self.assertIn("MODEL_PATH=/models/deepseek_v3.1_terminus", source)
+        self.assertIn("TP_SIZE=8", source)
+        self.assertIn("DP_SIZE=8", source)
+        self.assertIn("ENABLE_CUSTOM_LOGIT_PROCESSOR=1", source)
 
     def test_runner_declares_full_timeline_contract(self):
         source = RUNNER.read_text(encoding="utf-8")
@@ -171,6 +174,10 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
         source = RUNNER.read_text(encoding="utf-8")
 
         self.assertIn("assert '--enable-pd-flip-prefill-donor' in decoded", source)
+        self.assertIn("assert '--tp-size 8' in decoded", source)
+        self.assertIn("assert '--dp-size 8' in decoded", source)
+        self.assertIn("assert '--enable-dp-attention' in decoded", source)
+        self.assertIn("assert '--enable-custom-logit-processor' in decoded", source)
         self.assertIn("pd_flip_controller.py --prefill-donor-mode --router-url", source)
 
     def test_router_is_restarted_after_workers_are_healthy(self):

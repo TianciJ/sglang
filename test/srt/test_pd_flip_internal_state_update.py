@@ -243,6 +243,7 @@ class TestPDFlipInternalStateUpdate(unittest.TestCase):
             return_logprob=False,
             req_pool_idx=3,
             kv_committed_len=4,
+            finished=lambda: False,
             sampling_params=types.SimpleNamespace(to_json=lambda: {"temperature": 0.0}),
         )
         scheduler = Scheduler.__new__(Scheduler)

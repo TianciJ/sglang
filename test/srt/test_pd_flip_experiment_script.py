@@ -289,10 +289,12 @@ class TestPDFlipExperimentScript(unittest.TestCase):
             ],
         )
 
-    def test_docker_env_default_uses_eight_gpus_per_worker(self):
+    def test_docker_env_uses_deepseek_attention_dp8(self):
         values = self._read_docker_env()
 
-        self.assertEqual(int(values["TP_SIZE"]) * int(values["DP_SIZE"]), 8)
+        self.assertEqual(int(values["TP_SIZE"]), 8)
+        self.assertEqual(int(values["DP_SIZE"]), 8)
+        self.assertEqual(values["ENABLE_CUSTOM_LOGIT_PROCESSOR"], "1")
 
     def test_docker_env_declares_four_cloud_hosts_and_monitor_thresholds(self):
         values = self._read_docker_env()

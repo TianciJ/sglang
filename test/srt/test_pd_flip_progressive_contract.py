@@ -182,6 +182,9 @@ def test_example_environment_is_one_prefill_three_decode_and_progressive_safe():
     assert env["MOONCAKE_MASTER"]
     assert env["MOONCAKE_TE_META_DATA_SERVER"].endswith("/metadata")
     assert env["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == "0"
+    assert env["TP_SIZE"] == "8"
+    assert env["DP_SIZE"] == "8"
+    assert env["ENABLE_CUSTOM_LOGIT_PROCESSOR"] == "1"
     assert env["ADMIN_API_KEY"]
     assert env["PD_FLIP_ARTIFACT_DIR"]
 
@@ -190,6 +193,10 @@ def test_worker_and_controller_forward_the_deployment_contract():
     worker = read(HARNESS / "run_worker.sh")
     controller = read(HARNESS / "run_controller.sh")
     for flag in (
+        "--tp-size",
+        "--dp-size",
+        "--enable-dp-attention",
+        "--enable-custom-logit-processor",
         "--enable-pd-flip-state-machine",
         "--enable-pd-runtime-role-switch",
         "--enable-pd-flip-hicache-stitch",
@@ -252,7 +259,12 @@ def test_harnesses_fail_closed_for_empty_or_placeholder_admin_keys(tmp_path):
 
 def test_valid_admin_key_is_forwarded_to_worker_controller_and_router(tmp_path):
     worker = run_harness(
-        tmp_path / "worker", "run_worker.sh", "decode", "0.0.0.0", admin_key="secret"
+        tmp_path / "worker",
+        "run_worker.sh",
+        "decode",
+        "0.0.0.0",
+        admin_key="secret",
+        ENABLE_CUSTOM_LOGIT_PROCESSOR=1,
     )
     controller = run_harness(
         tmp_path / "controller", "run_controller.sh", "metrics", admin_key="secret"
@@ -261,6 +273,10 @@ def test_valid_admin_key_is_forwarded_to_worker_controller_and_router(tmp_path):
     for result in (worker, controller, router):
         assert result.returncode == 0, result.stderr
     assert "--admin-api-key secret" in worker.stdout
+    assert "--tp-size 1" in worker.stdout
+    assert "--dp-size 1" in worker.stdout
+    assert "--enable-dp-attention" in worker.stdout
+    assert "--enable-custom-logit-processor" in worker.stdout
     assert "ARG=--api-key\nARG=secret" in controller.stdout
     assert "secret" not in router.stdout
     assert "ARG=-e\nARG=PD_FLIP_ROUTER_ADMIN_API_KEY" in router.stdout
