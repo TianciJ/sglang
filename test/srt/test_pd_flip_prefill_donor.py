@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pytest
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEDULER_PATH = REPO_ROOT / "python/sglang/srt/managers/scheduler.py"
 SERVER_ARGS_PATH = REPO_ROOT / "python/sglang/srt/server_args.py"
@@ -103,6 +102,82 @@ def test_source_manifest_preserves_original_prefill_identity():
     assert manifest["prefill_donor_bootstrap_room"] != 700
 
 
+def test_manifest_carries_dp_rank_and_mla_layout_identity():
+    from sglang.srt.managers.scheduler import Scheduler
+
+    mla_pool = type("MLATokenToKVPool", (), {})()
+    mla_pool.dtype = "torch.bfloat16"
+    mla_pool.store_dtype = "torch.bfloat16"
+    mla_pool.layer_num = 61
+    mla_pool.kv_lora_rank = 512
+    mla_pool.qk_rope_head_dim = 64
+    mla_pool.kv_cache_dim = 576
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.ps = types.SimpleNamespace(attn_dp_rank=5, dp_rank=0, tp_rank=3)
+    scheduler.server_args = types.SimpleNamespace(dp_size=8, tp_size=8)
+    scheduler.model_config = types.SimpleNamespace(
+        model_path="/models/deepseek_v3.1_terminus",
+        dtype="torch.bfloat16",
+        num_hidden_layers=61,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+    )
+    scheduler.token_to_kv_pool_allocator = types.SimpleNamespace(
+        page_size=64,
+        get_kvcache=lambda: mla_pool,
+    )
+    req = types.SimpleNamespace(
+        rid="ranked-rid",
+        origin_input_ids=[1, 2, 3],
+        output_ids=[4],
+        routed_dp_rank=5,
+        disagg_prefill_dp_rank=2,
+        pd_flip_target_decode_dp_rank=6,
+    )
+
+    manifest = scheduler._pd_flip_build_migration_manifest(req)
+
+    assert manifest["source_decode_dp_rank"] == 5
+    assert manifest["prefill_donor_dp_rank"] == 2
+    assert manifest["target_decode_dp_rank"] == 6
+    assert manifest["source_tp_rank"] == 3
+    assert manifest["page_size"] == 64
+    assert manifest["kv_layout"] == "mla"
+    assert manifest["kv_pool_class"] == "MLATokenToKVPool"
+    assert len(manifest["model_fingerprint"]) == 64
+
+
+def test_target_layout_validation_rejects_mla_page_mismatch():
+    from sglang.srt.managers.scheduler import Scheduler
+
+    pool = type("MLATokenToKVPool", (), {})()
+    pool.dtype = "torch.bfloat16"
+    pool.store_dtype = "torch.bfloat16"
+    pool.layer_num = 61
+    pool.kv_lora_rank = 512
+    pool.qk_rope_head_dim = 64
+    pool.kv_cache_dim = 576
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.server_args = types.SimpleNamespace(dp_size=8, tp_size=8)
+    scheduler.model_config = types.SimpleNamespace(
+        model_path="/models/deepseek_v3.1_terminus",
+        dtype="torch.bfloat16",
+        num_hidden_layers=61,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+    )
+    scheduler.token_to_kv_pool_allocator = types.SimpleNamespace(
+        page_size=64,
+        get_kvcache=lambda: pool,
+    )
+    manifest = scheduler._pd_flip_kv_layout_metadata()
+    manifest["page_size"] = 32
+
+    with pytest.raises(ValueError, match="page_size"):
+        scheduler._pd_flip_validate_layout(manifest)
+
+
 class _Tensor:
     def __init__(self, values):
         self.values = np.asarray(values)
@@ -195,9 +270,7 @@ def test_target_donor_mode_skips_target_prefix_match_and_splits_ranges():
     queue = types.SimpleNamespace(
         _pre_alloc=_pre_alloc,
         _match_prefix_and_lock=lambda _req: prefix_calls.append(_req),
-        kv_manager=types.SimpleNamespace(
-            kv_args=types.SimpleNamespace(state_types=[])
-        ),
+        kv_manager=types.SimpleNamespace(kv_args=types.SimpleNamespace(state_types=[])),
     )
     scheduler = types.SimpleNamespace(
         disagg_decode_prealloc_queue=queue,
@@ -311,7 +384,12 @@ def test_target_donor_pump_holds_request_after_both_ranges_arrive():
         SCHEDULER_PATH,
         "Scheduler",
         "_pd_flip_target_pump_donor_transfer",
-        {"Any": Any, "Dict": Dict, "KVPoll": _Poll, "time": types.SimpleNamespace(monotonic=lambda: 1.0)},
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "KVPoll": _Poll,
+            "time": types.SimpleNamespace(monotonic=lambda: 1.0),
+        },
     )
     source_receiver = _PollingReceiver([_Poll.WaitingForInput, _Poll.Success])
     prefill_receiver = _PollingReceiver([_Poll.WaitingForInput, _Poll.Success])
@@ -363,9 +441,7 @@ def test_target_metadata_ready_for_checks_the_selected_receiver_room():
     scheduler = types.SimpleNamespace(
         disagg_metadata_buffers=types.SimpleNamespace(bootstrap_room=rooms)
     )
-    receiver_req = types.SimpleNamespace(
-        req=types.SimpleNamespace(bootstrap_room=900)
-    )
+    receiver_req = types.SimpleNamespace(req=types.SimpleNamespace(bootstrap_room=900))
     entry = {"prefill_metadata_index": 8}
 
     assert ready_for(scheduler, entry, "prefill_metadata_index", receiver_req) is False
@@ -646,9 +722,7 @@ def test_prefill_donor_entry_builds_truncated_prompt_sender():
     )
 
     class Sender:
-        def __init__(
-            self, mgr, bootstrap_addr, bootstrap_room, dest_tp_ranks, pp_rank
-        ):
+        def __init__(self, mgr, bootstrap_addr, bootstrap_room, dest_tp_ranks, pp_rank):
             self.mgr = mgr
             self.bootstrap_addr = bootstrap_addr
             self.bootstrap_room = bootstrap_room
@@ -684,9 +758,7 @@ def test_prefill_donor_entry_builds_truncated_prompt_sender():
     }
     kv_manager = object()
 
-    entry = prepare(
-        scheduler, manifest, Sender, kv_manager, "prefill-p:8998"
-    )
+    entry = prepare(scheduler, manifest, Sender, kv_manager, "prefill-p:8998")
 
     assert len(entry["req"].origin_input_ids) == 1920
     assert entry["req"].output_ids == []
@@ -741,7 +813,9 @@ def test_prefill_donor_cleanup_unlocks_match_when_alloc_never_started():
     unlocked = []
     node = object()
     scheduler = types.SimpleNamespace(
-        tree_cache=types.SimpleNamespace(dec_lock_ref=lambda current: unlocked.append(current)),
+        tree_cache=types.SimpleNamespace(
+            dec_lock_ref=lambda current: unlocked.append(current)
+        ),
         _pd_flip_free_source_metadata=lambda _entry: None,
     )
     entry = {

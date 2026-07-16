@@ -3376,6 +3376,106 @@ class Scheduler(
             and getattr(self, "token_to_kv_pool_allocator", None) is not None
         )
 
+    def _pd_flip_attn_dp_rank(self) -> int:
+        ps = getattr(self, "ps", None)
+        rank = getattr(ps, "attn_dp_rank", None)
+        if rank is None:
+            rank = getattr(ps, "dp_rank", 0)
+        return int(rank or 0)
+
+    def _pd_flip_model_fingerprint(self, kv_pool=None) -> str:
+        model_config = getattr(self, "model_config", None)
+        server_args = getattr(self, "server_args", None)
+        if kv_pool is None:
+            allocator = getattr(self, "token_to_kv_pool_allocator", None)
+            get_kvcache = getattr(allocator, "get_kvcache", None)
+            kv_pool = get_kvcache() if callable(get_kvcache) else None
+        fingerprint_values = {
+            "model_path": str(getattr(model_config, "model_path", "") or ""),
+            "model_dtype": str(getattr(model_config, "dtype", "") or ""),
+            "num_hidden_layers": getattr(model_config, "num_hidden_layers", None),
+            "kv_lora_rank": getattr(model_config, "kv_lora_rank", None),
+            "qk_rope_head_dim": getattr(model_config, "qk_rope_head_dim", None),
+            "tp_size": getattr(server_args, "tp_size", None),
+            "kv_pool_class": type(kv_pool).__name__ if kv_pool is not None else None,
+            "kv_dtype": str(getattr(kv_pool, "dtype", "") or ""),
+            "kv_store_dtype": str(getattr(kv_pool, "store_dtype", "") or ""),
+            "kv_layer_num": getattr(kv_pool, "layer_num", None),
+            "kv_cache_dim": getattr(kv_pool, "kv_cache_dim", None),
+            "kv_head_num": getattr(kv_pool, "head_num", None),
+            "kv_head_dim": getattr(kv_pool, "head_dim", None),
+        }
+        payload = json.dumps(
+            fingerprint_values,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _pd_flip_kv_layout_metadata(self) -> Dict[str, Any]:
+        allocator = getattr(self, "token_to_kv_pool_allocator", None)
+        get_kvcache = getattr(allocator, "get_kvcache", None)
+        kv_pool = get_kvcache() if callable(get_kvcache) else None
+        pool_class = type(kv_pool).__name__ if kv_pool is not None else "unknown"
+        layout = "mla" if "MLA" in pool_class.upper() else "mha"
+        store_dtype = getattr(kv_pool, "store_dtype", None)
+        element_size = getattr(store_dtype, "itemsize", None)
+        if callable(element_size):
+            element_size = element_size()
+        per_token_shape = None
+        if layout == "mla" and getattr(kv_pool, "kv_cache_dim", None) is not None:
+            per_token_shape = [1, int(kv_pool.kv_cache_dim)]
+        elif getattr(kv_pool, "head_num", None) is not None:
+            per_token_shape = [
+                int(kv_pool.head_num),
+                int(getattr(kv_pool, "head_dim", 0) or 0),
+            ]
+        return {
+            "page_size": int(getattr(allocator, "page_size", 1) or 1),
+            "kv_layout": layout,
+            "kv_pool_class": pool_class,
+            "kv_dtype": str(getattr(kv_pool, "dtype", "") or ""),
+            "kv_store_dtype": str(store_dtype or ""),
+            "kv_element_size": (
+                int(element_size) if element_size is not None else None
+            ),
+            "kv_layer_count": getattr(kv_pool, "layer_num", None),
+            "kv_per_token_shape": per_token_shape,
+            "model_fingerprint": self._pd_flip_model_fingerprint(kv_pool),
+        }
+
+    def _pd_flip_validate_layout(self, manifest: Dict[str, Any]) -> None:
+        required_keys = (
+            "page_size",
+            "kv_layout",
+            "kv_pool_class",
+            "model_fingerprint",
+        )
+        dp_size = int(
+            getattr(getattr(self, "server_args", None), "dp_size", 1) or 1
+        )
+        if not any(key in manifest for key in required_keys):
+            if dp_size > 1:
+                raise ValueError(
+                    "PD Flip KV layout metadata is required when dp_size="
+                    f"{dp_size}"
+                )
+            return
+        local = self._pd_flip_kv_layout_metadata()
+        for key in required_keys + (
+            "kv_dtype",
+            "kv_store_dtype",
+            "kv_element_size",
+            "kv_layer_count",
+            "kv_per_token_shape",
+        ):
+            if key in manifest and manifest.get(key) != local.get(key):
+                raise ValueError(
+                    f"PD Flip KV layout mismatch for {key}: "
+                    f"source={manifest.get(key)!r} target={local.get(key)!r}"
+                )
+
     def _pd_flip_migration_room_for_req(self, req: Req) -> int:
         server_args = getattr(self, "server_args", None)
         dp_size = max(1, int(getattr(server_args, "dp_size", 1)))
@@ -4471,6 +4571,7 @@ class Scheduler(
             for manifest in manifests:
                 entry_started = time.monotonic()
                 timing_debug = {}
+                self._pd_flip_validate_layout(manifest)
                 if prefill_donor_mode:
                     entry = self._pd_flip_prepare_target_donor_entry(
                         manifest, source_host, receiver_class, kv_manager
@@ -6114,7 +6215,7 @@ class Scheduler(
         kv_committed_len = getattr(req, "kv_committed_len", None)
         if kv_committed_len is None:
             kv_committed_len = len(origin_input_ids) + max(0, len(output_ids) - 1)
-        return {
+        manifest = {
             "rid": getattr(req, "rid", ""),
             "origin_input_ids": origin_input_ids,
             "output_ids": output_ids,
@@ -6139,7 +6240,19 @@ class Scheduler(
                 getattr(req, "pd_flip_last_emitted_output_seq", 0) or 0
             ),
             "pd_flip_session_id": getattr(req, "pd_flip_migration_session_id", None),
+            "source_decode_dp_rank": int(
+                getattr(req, "routed_dp_rank", None)
+                if getattr(req, "routed_dp_rank", None) is not None
+                else self._pd_flip_attn_dp_rank()
+            ),
+            "prefill_donor_dp_rank": getattr(req, "disagg_prefill_dp_rank", None),
+            "target_decode_dp_rank": getattr(
+                req, "pd_flip_target_decode_dp_rank", None
+            ),
+            "source_tp_rank": int(getattr(getattr(self, "ps", None), "tp_rank", 0)),
         }
+        manifest.update(self._pd_flip_kv_layout_metadata())
+        return manifest
 
     @staticmethod
     def _pd_flip_serialize_sampling_params(sampling_params) -> Dict[str, Any]:
