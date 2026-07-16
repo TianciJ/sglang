@@ -1282,15 +1282,17 @@ class Scheduler(
 
     def _pd_flip_capacity_status(self) -> Dict[str, Any]:
         running = list(getattr(getattr(self, "running_batch", None), "reqs", []))
+        page_size = max(1, int(getattr(self, "page_size", 1) or 1))
+        available_kv_tokens = int(self.token_to_kv_pool_allocator.available_size())
         free_slots = min(
             max(0, self.max_running_requests - len(running)),
             int(self.req_to_token_pool.available_size()),
         )
         return {
             "free_request_slots": free_slots,
-            "available_kv_tokens": int(
-                self.token_to_kv_pool_allocator.available_size()
-            ),
+            "available_kv_tokens": available_kv_tokens,
+            "page_size": page_size,
+            "free_kv_pages": available_kv_tokens // page_size,
             "max_running_requests_per_dp": int(self.max_running_requests),
             "reserved_decode_tokens_per_req": int(
                 self.server_args.num_reserved_decode_tokens
@@ -1317,8 +1319,11 @@ class Scheduler(
         except Exception:
             logger.exception("Failed to compute PD runtime role idle status.")
 
+        dp_rank = getattr(self.ps, "attn_dp_rank", None)
+        if dp_rank is None:
+            dp_rank = getattr(self.ps, "dp_rank", 0) or 0
         status = {
-            "dp_rank": self.ps.dp_rank,
+            "dp_rank": int(dp_rank),
             "tp_rank": self.ps.tp_rank,
             "role": self.pd_runtime_role(),
             "active_event_loop_role": getattr(
@@ -1973,6 +1978,11 @@ class Scheduler(
     def start_pd_flip_migration_source(
         self, recv_req: PDFlipMigrationSourceStartReq
     ) -> PDFlipMigrationReqOutput:
+        ps = getattr(self, "ps", None)
+        local_dp_rank = getattr(ps, "attn_dp_rank", None)
+        if local_dp_rank is None:
+            local_dp_rank = getattr(ps, "dp_rank", 0) or 0
+        local_dp_rank = int(local_dp_rank)
         prefill_donor_mode = bool(
             getattr(recv_req, "prefill_donor_mode", False)
         )
@@ -2066,12 +2076,28 @@ class Scheduler(
         timing_debug["waiting_skipped"] = waiting_skipped
 
         session_id = recv_req.session_id or f"pd-flip-{int(time.time() * 1000)}"
+        target_decode_dp_rank = getattr(recv_req, "target_decode_dp_rank", None)
+        target_decode_dp_ranks = getattr(recv_req, "target_decode_dp_ranks", None) or {}
+        if not isinstance(target_decode_dp_ranks, dict):
+            return PDFlipMigrationReqOutput(
+                success=False,
+                message="target_decode_dp_ranks must be an object",
+                status=self._pd_flip_migration_status_dict(),
+            )
+        target_decode_dp_ranks = {
+            str(rid): int(rank) for rid, rank in target_decode_dp_ranks.items()
+        }
         manifest_started = time.monotonic()
         manifests = []
         migration_reqs = []
         source_waiting_reqs = []
         for req in running_reqs:
             req.pd_flip_migration_session_id = session_id
+            req_target_rank = target_decode_dp_ranks.get(
+                str(req.rid), target_decode_dp_rank
+            )
+            if req_target_rank is not None:
+                req.pd_flip_target_decode_dp_rank = int(req_target_rank)
             manifest = self._pd_flip_build_migration_manifest(req)
             manifest["pd_flip_source_queue"] = "running"
             manifest["migration_bootstrap_room"] = self._pd_flip_migration_room_for_req(
@@ -2092,6 +2118,11 @@ class Scheduler(
         waiting_manifest_started = time.monotonic()
         for queue_index, req in waiting_selected:
             req.pd_flip_migration_session_id = session_id
+            req_target_rank = target_decode_dp_ranks.get(
+                str(req.rid), target_decode_dp_rank
+            )
+            if req_target_rank is not None:
+                req.pd_flip_target_decode_dp_rank = int(req_target_rank)
             manifest = self._pd_flip_build_migration_manifest(req)
             manifest["pd_flip_source_queue"] = "waiting"
             manifest["pd_flip_waiting_queue_index"] = queue_index
@@ -2157,7 +2188,7 @@ class Scheduler(
             message=real_error or "source migration session started",
             status=self._pd_flip_migration_status_dict(),
             manifests=manifests,
-            dp_rank=self._pd_flip_attn_dp_rank(),
+            dp_rank=local_dp_rank,
             handled_rids=list(session["handled_rids"]),
         )
 
@@ -3083,7 +3114,11 @@ class Scheduler(
                 message=f"local migration role is {session.get('role')}, not source",
                 status=self._pd_flip_migration_status_dict(),
             )
-        if recv_req.session_id and recv_req.session_id != session.get("session_id"):
+        if (
+            recv_req.session_id
+            and session.get("session_id") is not None
+            and recv_req.session_id != session.get("session_id")
+        ):
             return PDFlipMigrationReqOutput(
                 success=False,
                 message="source migration session id does not match",
@@ -3109,12 +3144,16 @@ class Scheduler(
 
         manifests = list(session.get("manifests", []))
         released_rids = recv_req.released_rids
+        local_manifest_rids = [
+            str(manifest.get("rid"))
+            for manifest in manifests
+            if manifest.get("rid") is not None
+        ]
+        rid_partition = self._pd_flip_partition_rids(
+            released_rids, local_manifest_rids
+        )
         if released_rids is not None:
-            released = {
-                manifest.get("rid")
-                for manifest in manifests
-                if manifest.get("rid") in set(released_rids)
-            }
+            released = set(rid_partition["handled_rids"])
         else:
             released = {manifest.get("rid") for manifest in manifests}
         transferred = set(session.get("transferred_rids", set()))
@@ -3188,6 +3227,9 @@ class Scheduler(
             message="source migration session released",
             status=self._pd_flip_migration_status_dict(),
             manifests=manifests,
+            dp_rank=rid_partition["dp_rank"],
+            handled_rids=rid_partition["handled_rids"],
+            ignored_rids=rid_partition["ignored_rids"],
         )
 
     def start_pd_flip_migration_source_delta(
@@ -6462,6 +6504,11 @@ class Scheduler(
         raise TypeError(f"unsupported PD Flip manifest value: {type(value).__name__}")
 
     def _pd_flip_migration_status_dict(self) -> Dict[str, Any]:
+        ps = getattr(self, "ps", None)
+        local_dp_rank = getattr(ps, "attn_dp_rank", None)
+        if local_dp_rank is None:
+            local_dp_rank = getattr(ps, "dp_rank", 0) or 0
+        local_dp_rank = int(local_dp_rank)
         session = getattr(self, "pd_flip_migration_session", None)
         if not session:
             return {
@@ -6488,7 +6535,7 @@ class Scheduler(
                 "fallback_reason": "",
                 "rollover_blockers": [],
                 "request_measurements": [],
-                "dp_rank": self._pd_flip_attn_dp_rank(),
+                "dp_rank": local_dp_rank,
                 "handled_rids": [],
                 "ignored_rids": [],
                 "session_archive": list(
@@ -6509,7 +6556,7 @@ class Scheduler(
             "last_error": session.get("last_error", ""),
             "dry_run": bool(session.get("dry_run", False)),
             "prepare_only": bool(session.get("prepare_only", False)),
-            "dp_rank": self._pd_flip_attn_dp_rank(),
+            "dp_rank": local_dp_rank,
             "handled_rids": list(session.get("handled_rids") or []),
             "ignored_rids": list(session.get("ignored_rids") or []),
             "waiting_reqs": int(session_timing.get("waiting_reqs", 0) or 0),

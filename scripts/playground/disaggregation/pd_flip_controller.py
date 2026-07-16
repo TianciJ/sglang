@@ -78,6 +78,8 @@ def _migration_source_start_payload(
     rids: Optional[List[str]],
     include_waiting: bool = False,
     prefill_donor_mode: bool = False,
+    target_decode_dp_rank: Optional[int] = None,
+    target_decode_dp_ranks: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     payload = {
         "session_id": session_id,
@@ -87,6 +89,12 @@ def _migration_source_start_payload(
     }
     if prefill_donor_mode:
         payload["prefill_donor_mode"] = True
+    if target_decode_dp_rank is not None:
+        payload["target_decode_dp_rank"] = int(target_decode_dp_rank)
+    if target_decode_dp_ranks is not None:
+        payload["target_decode_dp_ranks"] = {
+            str(rid): int(rank) for rid, rank in target_decode_dp_ranks.items()
+        }
     return payload
 
 
@@ -281,6 +289,7 @@ class NodeMetrics:
     total_tokens: int = 0
     token_usage: Optional[float] = None
     raw_status: JsonDict = field(default_factory=dict)
+    dp_statuses: List[JsonDict] = field(default_factory=list)
     raw_loads: List[JsonDict] = field(default_factory=list)
 
     @property
@@ -600,8 +609,7 @@ class PDFlipController:
                 runtime = self.client.get_json(
                     source.worker_url, "/pd_flip/runtime_role/status"
                 )
-                _require_single_dp_runtime_status(runtime, source.name)
-                statuses = runtime if isinstance(runtime, list) else [runtime]
+                statuses = list(_index_dp_responses(runtime).values())
                 roles = set()
                 for status in statuses:
                     role, _, _ = _parse_runtime_status(status)
@@ -1058,9 +1066,10 @@ class PDFlipController:
             status_body = self.client.get_json(
                 node.worker_url, "/pd_flip/runtime_role/status"
             )
-            _require_single_dp_runtime_status(status_body, node.name)
             loads_body = self.client.get_json(node.worker_url, "/v1/loads?include=all")
-            status = _first_successful_response(status_body)
+            indexed_statuses = _index_dp_responses(status_body)
+            dp_statuses = [indexed_statuses[rank] for rank in sorted(indexed_statuses)]
+            status = _aggregate_dp_runtime_status(dp_statuses, node.name)
             role, is_idle, admission_paused = _parse_runtime_status(status)
             running_reqs, waiting_reqs, total_tokens, token_usage, raw_loads = (
                 _parse_loads(loads_body)
@@ -1086,6 +1095,7 @@ class PDFlipController:
                     total_tokens=total_tokens,
                     token_usage=token_usage,
                     raw_status=status,
+                    dp_statuses=dp_statuses,
                     raw_loads=raw_loads,
                 )
             )
@@ -1674,10 +1684,26 @@ class PDFlipController:
         requested_rids = tuple(str(rid) for rid in rids)
         if not requested_rids and not include_waiting:
             raise ValueError("atomic migration batch must not have empty rids")
+        source_dp_statuses = source.dp_statuses or [source.raw_status]
+        target_dp_statuses = target.dp_statuses or [target.raw_status]
+        target_decode_dp_rank: Optional[int] = None
+        target_decode_dp_ranks: Optional[Dict[str, int]] = None
+        if len(_index_dp_responses(target_dp_statuses)) > 1:
+            if requested_rids:
+                target_decode_dp_ranks = _assign_target_dp_ranks(
+                    target_dp_statuses,
+                    _required_kv_pages_by_rid(source_dp_statuses, requested_rids),
+                )
+            if include_waiting:
+                # Waiting-only batches do not expose their RIDs until source
+                # selection. Use the roomiest rank; target prepare remains the
+                # authoritative capacity check for these requests.
+                target_decode_dp_rank = select_target_dp_rank(target_dp_statuses, 0)
         source_finished = False
         cutover_started = False
         journal_rids = requested_rids
         prefill_donor_groups: Dict[str, List[JsonDict]] = {}
+        prefill_donor_expected_statuses: Dict[str, Any] = {}
         try:
             self._write_journal_phase(
                 source,
@@ -1705,11 +1731,41 @@ class PDFlipController:
                     list(requested_rids),
                     include_waiting=include_waiting,
                     prefill_donor_mode=self.config.prefill_donor_mode,
+                    target_decode_dp_rank=target_decode_dp_rank,
+                    target_decode_dp_ranks=target_decode_dp_ranks,
                 ),
+            )
+            _require_worker_dp_ranks(
+                source_start, source_dp_statuses, "source start"
+            )
+            _require_request_owners(
+                source_start,
+                _manifest_rids(_strict_response_manifests(
+                    source_start, "invalid source start response manifests"
+                )),
+                "source start",
             )
             manifests = _strict_response_manifests(
                 source_start, "invalid source start response manifests"
             )
+            if target_decode_dp_rank is not None and any(
+                int(manifest.get("target_decode_dp_rank", -1))
+                != target_decode_dp_rank
+                for manifest in manifests
+            ):
+                raise RuntimeError(
+                    "source start did not preserve selected target_decode_dp_rank"
+                )
+            if target_decode_dp_ranks is not None and any(
+                int(manifest.get("target_decode_dp_rank", -1))
+                != target_decode_dp_ranks.get(
+                    str(manifest.get("rid")), target_decode_dp_rank
+                )
+                for manifest in manifests
+            ):
+                raise RuntimeError(
+                    "source start did not preserve per-request target DP ranks"
+                )
             batch_rids = tuple(_manifest_rids(manifests))
             if include_waiting:
                 if batch_rids[: len(requested_rids)] != requested_rids:
@@ -1741,13 +1797,17 @@ class PDFlipController:
             }
             if self.config.prefill_donor_mode:
                 target_payload["prefill_donor_mode"] = True
-            self._post_worker(
+            target_prepare = self._post_worker(
                 records,
                 "prepare_decode_migration_target",
                 target,
                 "/pd_flip/migration/target/prepare",
                 target_payload,
             )
+            _require_worker_dp_ranks(
+                target_prepare, target_dp_statuses, "target prepare"
+            )
+            _require_request_owners(target_prepare, batch_rids, "target prepare")
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "target_prepared"
             )
@@ -1767,7 +1827,7 @@ class PDFlipController:
                     node.worker_url: node for node in self.config.nodes
                 }
                 for donor_url, donor_manifests in prefill_donor_groups.items():
-                    self._post_worker(
+                    donor_start = self._post_worker(
                         records,
                         "start_prefill_donor",
                         nodes_by_url[donor_url],
@@ -1776,6 +1836,13 @@ class PDFlipController:
                             "session_id": session_id,
                             "manifests": donor_manifests,
                         },
+                    )
+                    _index_dp_responses(donor_start)
+                    prefill_donor_expected_statuses[donor_url] = donor_start
+                    _require_request_owners(
+                        donor_start,
+                        _manifest_rids(donor_manifests),
+                        f"prefill donor start {donor_url}",
                     )
                 self._write_journal_phase(
                     source,
@@ -1792,6 +1859,7 @@ class PDFlipController:
                 session_id,
                 batch_rids,
                 prefill_donor_groups=prefill_donor_groups,
+                prefill_donor_expected_statuses=prefill_donor_expected_statuses,
             )
             if self.config.prefill_donor_mode:
                 self._write_journal_phase(
@@ -1815,7 +1883,7 @@ class PDFlipController:
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "target_delta_prepare_intent"
             )
-            self._post_worker(
+            target_delta_prepare = self._post_worker(
                 records,
                 "prepare_decode_migration_target_delta",
                 target,
@@ -1826,6 +1894,12 @@ class PDFlipController:
                     "manifests": delta_manifests,
                 },
             )
+            _require_worker_dp_ranks(
+                target_delta_prepare, target_dp_statuses, "target delta prepare"
+            )
+            _require_request_owners(
+                target_delta_prepare, batch_rids, "target delta prepare"
+            )
             self._wait_migration(records, "wait_decode_migration_source_delta", source)
             self._wait_migration(records, "wait_decode_migration_target_delta", target)
             self._write_journal_phase(
@@ -1834,13 +1908,17 @@ class PDFlipController:
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "target_commit_intent"
             )
-            self._post_worker(
+            target_commit = self._post_worker(
                 records,
                 "commit_decode_migration_target",
                 target,
                 "/pd_flip/migration/target/commit",
                 {"session_id": session_id, "rids": list(batch_rids)},
             )
+            _require_worker_dp_ranks(
+                target_commit, target_dp_statuses, "target commit"
+            )
+            _require_request_owners(target_commit, batch_rids, "target commit")
             self._write_journal_phase(
                 source, target, session_id, batch_rids, "target_ready"
             )
@@ -1860,13 +1938,17 @@ class PDFlipController:
                 cutover_metadata,
             )
             cutover_started = True
-            self._post_worker(
+            source_finish = self._post_worker(
                 records,
                 "finish_decode_migration_source",
                 source,
                 "/pd_flip/migration/source/finish",
                 {"session_id": session_id, "released_rids": list(batch_rids)},
             )
+            _require_worker_dp_ranks(
+                source_finish, source_dp_statuses, "source release"
+            )
+            _require_request_owners(source_finish, batch_rids, "source release")
             source_finished = True
             self._write_journal_phase(
                 source,
@@ -1877,13 +1959,17 @@ class PDFlipController:
                 True,
                 cutover_metadata,
             )
-            self._post_worker(
+            target_activate = self._post_worker(
                 records,
                 "activate_decode_migration_target",
                 target,
                 "/pd_flip/migration/target/activate",
                 {"session_id": session_id, "rids": list(batch_rids)},
             )
+            _require_worker_dp_ranks(
+                target_activate, target_dp_statuses, "target activate"
+            )
+            _require_request_owners(target_activate, batch_rids, "target activate")
             if next_fsm_phase == "observing":
                 self._write_journal_phase(
                     source,
@@ -1950,12 +2036,14 @@ class PDFlipController:
         batch_rids: Sequence[str],
         *,
         prefill_donor_groups: Optional[Dict[str, List[JsonDict]]] = None,
+        prefill_donor_expected_statuses: Optional[Dict[str, Any]] = None,
     ) -> None:
         deadline = time.monotonic() + self.config.migration_timeout_seconds
         attempted = set()
         last_source = last_target = None
         last_donors: Dict[str, Any] = {}
         prefill_donor_groups = prefill_donor_groups or {}
+        prefill_donor_expected_statuses = prefill_donor_expected_statuses or {}
         nodes_by_url = {node.worker_url: node for node in self.config.nodes}
         while True:
             if time.monotonic() > deadline:
@@ -1977,6 +2065,16 @@ class PDFlipController:
                 target.worker_url,
                 "/pd_flip/migration/status",
             )
+            _require_worker_dp_ranks(
+                last_source,
+                source.dp_statuses or [source.raw_status],
+                "source base-ready",
+            )
+            _require_worker_dp_ranks(
+                last_target,
+                target.dp_statuses or [target.raw_status],
+                "target base-ready",
+            )
             last_donors = {
                 donor_url: self._record_get(
                     records,
@@ -1988,6 +2086,12 @@ class PDFlipController:
                 )
                 for donor_url in prefill_donor_groups
             }
+            for donor_url, donor_status in last_donors.items():
+                _require_worker_dp_ranks(
+                    donor_status,
+                    prefill_donor_expected_statuses.get(donor_url, donor_status),
+                    f"prefill donor base-ready {donor_url}",
+                )
             fallback_rids, reason, status_session = _migration_fallback_request(
                 last_target
             )
@@ -2101,8 +2205,16 @@ class PDFlipController:
                     _raise_if_unsuccessful(
                         response, "start_decode_migration_source_delta"
                     )
+                    _require_worker_dp_ranks(
+                        response,
+                        source.dp_statuses or [source.raw_status],
+                        "source delta",
+                    )
                     manifests = _strict_response_manifests(
                         response, "invalid source delta response manifests"
+                    )
+                    _require_request_owners(
+                        response, rids, "source delta"
                     )
                     records.append(
                         ActionRecord(
@@ -2376,6 +2488,11 @@ class PDFlipController:
                     last_response
                     if isinstance(last_response, list)
                     else [last_response]
+                )
+                _require_worker_dp_ranks(
+                    last_response,
+                    source.dp_statuses or [source.raw_status],
+                    step,
                 )
                 all_active = bool(statuses)
                 for status in statuses:
@@ -3555,6 +3672,9 @@ class PDFlipController:
                 node.worker_url,
                 "/pd_flip/migration/status",
             )
+            _require_worker_dp_ranks(
+                last_response, node.dp_statuses or [node.raw_status], step
+            )
             if _migration_response_complete(last_response):
                 return last_response
             if _migration_response_failed(last_response):
@@ -4275,30 +4395,54 @@ def _same_atomic_rids(left: Sequence[str], right: Sequence[str]) -> bool:
 
 
 def _migration_response_complete(response: Any) -> bool:
-    item = _first_successful_response(response)
-    status = item.get("status") if isinstance(item.get("status"), dict) else {}
-    failed = int(status.get("failed_reqs") or 0)
-    pending = int(status.get("pending_reqs") or 0)
-    return failed == 0 and pending == 0
+    responses = response if isinstance(response, list) else [response]
+    if not responses:
+        return False
+    for item in responses:
+        if not isinstance(item, dict) or item.get("success", True) is False:
+            return False
+        status = item.get("status") if isinstance(item.get("status"), dict) else {}
+        failed = int(status.get("failed_reqs") or 0)
+        pending = int(status.get("pending_reqs") or 0)
+        state = str(status.get("state") or item.get("state") or "").lower()
+        if failed > 0 or pending > 0 or state.endswith("_failed"):
+            return False
+    return True
 
 
 def _migration_response_failed(response: Any) -> bool:
-    item = _first_successful_response(response)
-    status = item.get("status") if isinstance(item.get("status"), dict) else {}
-    failed = int(status.get("failed_reqs") or 0)
-    state = str(status.get("state") or item.get("state") or "").lower()
-    return failed > 0 or state.endswith("_failed")
+    responses = response if isinstance(response, list) else [response]
+    for item in responses:
+        if not isinstance(item, dict) or item.get("success", True) is False:
+            return True
+        status = item.get("status") if isinstance(item.get("status"), dict) else {}
+        failed = int(status.get("failed_reqs") or 0)
+        state = str(status.get("state") or item.get("state") or "").lower()
+        if failed > 0 or state.endswith("_failed"):
+            return True
+    return False
 
 
 def _migration_response_error(response: Any) -> str:
-    item = _first_successful_response(response)
-    status = item.get("status") if isinstance(item.get("status"), dict) else {}
-    return str(
-        status.get("last_error")
-        or item.get("message")
-        or status.get("state")
-        or "migration failed"
-    )
+    responses = response if isinstance(response, list) else [response]
+    errors = []
+    for item in responses:
+        if not isinstance(item, dict):
+            errors.append("non-object response")
+            continue
+        status = item.get("status") if isinstance(item.get("status"), dict) else {}
+        failed = int(status.get("failed_reqs") or 0)
+        state = str(status.get("state") or item.get("state") or "").lower()
+        if item.get("success", True) is False or failed > 0 or state.endswith("_failed"):
+            rank = item.get("dp_rank", status.get("dp_rank", "?"))
+            detail = str(
+                status.get("last_error")
+                or item.get("message")
+                or status.get("state")
+                or "migration failed"
+            )
+            errors.append(f"dp_rank {rank}: {detail}")
+    return "; ".join(errors) or "migration failed"
 
 
 def _migration_fallback_request(response: Any) -> Tuple[List[str], str, Optional[str]]:
@@ -4336,29 +4480,266 @@ def _parse_runtime_status(item: JsonDict) -> Tuple[str, bool, bool]:
     return role, is_idle, admission_paused
 
 
-def _require_single_dp_runtime_status(body: Any, node_name: str) -> None:
-    responses = body if isinstance(body, list) else [body]
-    if len(responses) <= 1:
-        return
-    dp_ranks = []
-    for item in responses:
+def _aggregate_dp_runtime_status(items: List[JsonDict], node_name: str) -> JsonDict:
+    """Build node-level policy metrics while retaining rank-level status separately."""
+
+    if not items:
+        raise RuntimeError(f"runtime status is empty for {node_name}")
+    inner = [
+        item.get("status") if isinstance(item.get("status"), dict) else item
+        for item in items
+    ]
+    roles = {
+        _normalize_role(status.get("role") or status.get("current_role"))
+        for status in inner
+    }
+    if len(roles) != 1:
+        raise RuntimeError(f"mixed DP runtime roles for {node_name}: {sorted(roles)}")
+    aggregate = dict(items[0])
+    status = dict(inner[0])
+    status.update(
+        {
+            "role": next(iter(roles)),
+            "is_idle": all(bool(value.get("is_idle")) for value in inner),
+            "admission_paused": any(
+                bool(
+                    value.get("admission_paused")
+                    or value.get("pd_runtime_admission_paused")
+                    or value.get("pd_flip_admission_paused")
+                )
+                for value in inner
+            ),
+            "free_request_slots": sum(
+                int(value.get("free_request_slots", 0) or 0) for value in inner
+            ),
+            "available_kv_tokens": sum(
+                int(value.get("available_kv_tokens", 0) or 0) for value in inner
+            ),
+            "running_requests": [
+                request
+                for value in inner
+                for request in value.get("running_requests", [])
+                if isinstance(request, dict)
+            ],
+            "waiting_requests": [
+                request
+                for value in inner
+                for request in value.get("waiting_requests", [])
+                if isinstance(request, dict)
+            ],
+        }
+    )
+    aggregate["status"] = status
+    aggregate["success"] = all(item.get("success", True) is True for item in items)
+    return aggregate
+
+
+def _index_dp_responses(body: Any) -> Dict[int, JsonDict]:
+    """Index a fan-out HTTP response without silently dropping a DP rank."""
+
+    items = body if isinstance(body, list) else [body]
+    if not items:
+        raise RuntimeError("DP response is empty")
+    indexed: Dict[int, JsonDict] = {}
+    for item in items:
         if not isinstance(item, dict):
-            raise RuntimeError(
-                f"progressive PD flip requires DP_SIZE=1 for {node_name}; "
-                "multi-response status has no DP metadata"
-            )
+            raise RuntimeError("DP response item is not an object")
         status = item.get("status") if isinstance(item.get("status"), dict) else item
-        rank = status.get("dp_rank")
+        rank = item.get("dp_rank")
         if rank is None:
-            raise RuntimeError(
-                f"progressive PD flip requires DP_SIZE=1 for {node_name}; "
-                "multi-response status has no dp_rank"
+            rank = status.get("dp_rank")
+        if rank is None:
+            if len(items) == 1:
+                rank = 0
+            else:
+                raise RuntimeError("missing dp_rank in multi-response status")
+        try:
+            rank = int(rank)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid dp_rank: {rank!r}") from exc
+        if rank in indexed:
+            raise RuntimeError(f"duplicate dp_rank: {rank}")
+        indexed[rank] = item
+    return indexed
+
+
+def _request_owner_map(responses: Any, field: str) -> Dict[str, int]:
+    """Return the unique DP owner reported for each request ID."""
+
+    owners: Dict[str, int] = {}
+    for rank, item in _index_dp_responses(responses).items():
+        status = item.get("status") if isinstance(item.get("status"), dict) else {}
+        values = item.get(field, status.get(field, []))
+        if not isinstance(values, list):
+            raise RuntimeError(f"{field} for dp_rank {rank} is not a list")
+        for value in values:
+            rid = str(value).strip()
+            if not rid:
+                raise RuntimeError(f"{field} for dp_rank {rank} contains an empty RID")
+            if rid in owners:
+                raise RuntimeError(
+                    f"request {rid} has multiple owners: "
+                    f"dp_rank {owners[rid]} and dp_rank {rank}"
+                )
+            owners[rid] = rank
+    return owners
+
+
+def select_target_dp_rank(
+    statuses: Any, required_pages: int, required_request_slots: int = 1
+) -> int:
+    """Choose one eligible decode rank deterministically by free KV pages."""
+
+    required_pages = int(required_pages)
+    required_request_slots = int(required_request_slots)
+    if required_pages < 0:
+        raise ValueError("required_pages must be non-negative")
+    if required_request_slots < 1:
+        raise ValueError("required_request_slots must be positive")
+    indexed = _index_dp_responses(statuses)
+    candidates: List[Tuple[int, int]] = []
+    rejected: List[str] = []
+    for rank, item in indexed.items():
+        status = item.get("status") if isinstance(item.get("status"), dict) else item
+        role = _normalize_role(status.get("role") or status.get("current_role"))
+        paused = bool(
+            status.get("admission_paused")
+            or status.get("pd_runtime_admission_paused")
+            or status.get("pd_flip_admission_paused")
+        )
+        free_slots = int(status.get("free_request_slots", 1) or 0)
+        if status.get("free_kv_pages") is not None:
+            free_pages = int(status["free_kv_pages"])
+        else:
+            page_size = max(1, int(status.get("page_size", 1) or 1))
+            free_pages = int(status.get("available_kv_tokens", 0) or 0) // page_size
+        if role not in {"decode", "unknown"}:
+            rejected.append(f"rank {rank}: role={role}")
+        elif paused:
+            rejected.append(f"rank {rank}: admission paused")
+        elif free_slots < required_request_slots:
+            rejected.append(
+                f"rank {rank}: free_request_slots={free_slots} "
+                f"< {required_request_slots}"
             )
-        dp_ranks.append(int(rank))
-    if len(set(dp_ranks)) > 1:
+        elif free_pages < required_pages:
+            rejected.append(
+                f"rank {rank}: free_kv_pages={free_pages} < {required_pages}"
+            )
+        else:
+            candidates.append((free_pages, rank))
+    if not candidates:
+        detail = "; ".join(rejected) or "no status candidates"
         raise RuntimeError(
-            f"progressive PD flip requires DP_SIZE=1 for {node_name}; "
-            f"observed DP ranks {sorted(set(dp_ranks))}"
+            f"no decode DP rank has capacity for {required_pages} pages: {detail}"
+        )
+    candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
+    return candidates[0][1]
+
+
+def _required_kv_pages_by_rid(
+    statuses: Any, rids: Sequence[str]
+) -> Dict[str, int]:
+    """Estimate each target allocation from source committed KV plus reserve."""
+
+    requested = {str(rid): 0 for rid in rids}
+    if not requested:
+        return {}
+    committed_by_rid: Dict[str, Tuple[int, int, int]] = {}
+    for rank, item in _index_dp_responses(statuses).items():
+        status = item.get("status") if isinstance(item.get("status"), dict) else item
+        page_size = max(1, int(status.get("page_size", 1) or 1))
+        reserve = max(0, int(status.get("reserved_decode_tokens_per_req", 0) or 0))
+        running = status.get("running_requests", [])
+        if not isinstance(running, list):
+            raise RuntimeError(f"running_requests for dp_rank {rank} is not a list")
+        for request_status in running:
+            if not isinstance(request_status, dict) or request_status.get("rid") is None:
+                continue
+            rid = str(request_status["rid"])
+            if rid not in requested:
+                continue
+            if rid in committed_by_rid:
+                raise RuntimeError(f"request {rid} appears on multiple source DP ranks")
+            committed_by_rid[rid] = (
+                max(0, int(request_status.get("kv_committed_len", 0) or 0)),
+                reserve,
+                page_size,
+            )
+    for rid, (committed, reserve, page_size) in committed_by_rid.items():
+        requested[rid] = (committed + reserve + page_size - 1) // page_size
+    return requested
+
+
+def _required_kv_pages(statuses: Any, rids: Sequence[str]) -> int:
+    return sum(_required_kv_pages_by_rid(statuses, rids).values())
+
+
+def _assign_target_dp_ranks(
+    statuses: Any, required_pages_by_rid: Dict[str, int]
+) -> Dict[str, int]:
+    """Greedily place requests while accounting for each rank's remaining capacity."""
+
+    capacities: List[JsonDict] = []
+    for rank, item in _index_dp_responses(statuses).items():
+        status = item.get("status") if isinstance(item.get("status"), dict) else item
+        page_size = max(1, int(status.get("page_size", 1) or 1))
+        free_pages = (
+            int(status["free_kv_pages"])
+            if status.get("free_kv_pages") is not None
+            else int(status.get("available_kv_tokens", 0) or 0) // page_size
+        )
+        capacities.append(
+            {
+                **status,
+                "dp_rank": rank,
+                "free_kv_pages": free_pages,
+                "free_request_slots": int(
+                    status.get("free_request_slots", 1) or 0
+                ),
+            }
+        )
+
+    assignments: Dict[str, int] = {}
+    for rid, required_pages in required_pages_by_rid.items():
+        rank = select_target_dp_rank(capacities, int(required_pages))
+        assignments[str(rid)] = rank
+        selected = next(item for item in capacities if item["dp_rank"] == rank)
+        selected["free_kv_pages"] -= int(required_pages)
+        selected["free_request_slots"] -= 1
+    return assignments
+
+
+def _require_request_owners(response: Any, expected_rids: Sequence[str], step: str) -> None:
+    """For fan-out responses, require exactly one handling rank for every RID."""
+
+    indexed = _index_dp_responses(response)
+    if len(indexed) <= 1:
+        return
+    owners = _request_owner_map(list(indexed.values()), "handled_rids")
+    expected = {str(rid) for rid in expected_rids}
+    actual = set(owners)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise RuntimeError(
+            f"{step} DP ownership barrier failed: "
+            f"missing_rids={missing}, unexpected_rids={unexpected}"
+        )
+
+
+def _require_worker_dp_ranks(response: Any, expected_statuses: Any, step: str) -> None:
+    """Require a fan-out barrier response from every configured worker rank."""
+
+    expected = set(_index_dp_responses(expected_statuses))
+    if len(expected) <= 1:
+        return
+    actual = set(_index_dp_responses(response))
+    if actual != expected:
+        raise RuntimeError(
+            f"{step} DP rank barrier failed: "
+            f"missing_dp_ranks={sorted(expected - actual)}, "
+            f"unexpected_dp_ranks={sorted(actual - expected)}"
         )
 
 

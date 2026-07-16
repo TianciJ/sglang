@@ -34,6 +34,9 @@ class MigrationOutput:
     message: str
     status: Dict[str, Any]
     manifests: Optional[List[Dict[str, Any]]] = None
+    dp_rank: Optional[int] = None
+    handled_rids: Optional[List[str]] = None
+    ignored_rids: Optional[List[str]] = None
 
 
 class DisaggregationMode:

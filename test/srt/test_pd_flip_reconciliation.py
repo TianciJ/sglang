@@ -41,6 +41,9 @@ def load_scheduler_methods():
         "_pd_flip_rollover_blockers",
         "_pd_flip_can_rollover_session",
         "_pd_flip_archive_rollover_session",
+        "_pd_flip_attn_dp_rank",
+        "_pd_flip_partition_manifests",
+        "_pd_flip_partition_rids",
     }
     methods = [
         node
@@ -753,7 +756,7 @@ def test_worker_status_exports_real_request_measurement_fields():
     status = worker._pd_flip_migration_status_dict()
     row = status["request_measurements"][0]
 
-    assert row == {
+    expected = {
         "rid": "r0",
         "p_tokens": 4,
         "h_tokens": 3,
@@ -781,6 +784,7 @@ def test_worker_status_exports_real_request_measurement_fields():
         "fallback_source_bytes": None,
         "fallback_duration_seconds": None,
     }
+    assert {field: row[field] for field in expected} == expected
 
 
 def test_worker_status_measurement_missing_fields_are_stable():

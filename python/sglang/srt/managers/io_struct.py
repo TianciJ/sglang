@@ -1746,6 +1746,8 @@ class PDFlipMigrationSourceStartReq(BaseReq):
     rids: Optional[List[str]] = None
     include_waiting: bool = False
     prefill_donor_mode: bool = False
+    target_decode_dp_rank: Optional[int] = None
+    target_decode_dp_ranks: Optional[dict] = None
 
 
 @dataclass

@@ -801,7 +801,7 @@ def test_progressive_router_failure_after_worker_flip_stays_drained(tmp_path):
     assert controller.session_journal.read()["phase"] == "role_flip_complete"
 
 
-def test_collect_metrics_rejects_multiple_dp_ranks_before_mutation():
+def test_collect_metrics_preserves_multiple_dp_ranks_for_orchestration():
     client = ProgressiveScenarioClient()
     original = client.get_json
 
@@ -820,9 +820,18 @@ def test_collect_metrics_rejects_multiple_dp_ranks_before_mutation():
     client.get_json = get_json
     controller, _, _ = progressive_scenario((14, 20, 19, 20), client=client)
 
-    with pytest.raises(RuntimeError, match="DP_SIZE=1"):
-        controller.collect_metrics()
+    metrics = controller.collect_metrics()
+
     assert client.posts == []
+    assert len(metrics) == 2
+    assert all(
+        sorted(
+            item["status"]["dp_rank"]
+            for item in metric.dp_statuses
+        )
+        == [0, 1]
+        for metric in metrics
+    )
 
 
 def test_reconcile_observing_crash_restores_decode_admission(tmp_path):

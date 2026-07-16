@@ -532,6 +532,37 @@ class TestPDFlipMigrationAccounting(unittest.TestCase):
         self.assertEqual(captured["manifests"][0]["pd_flip_waiting_queue_index"], 0)
         self.assertEqual(scheduler.waiting_queue, [])
 
+    def test_source_start_applies_per_request_target_rank_before_sender_start(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        waiting_req = self._waiting_req("waiting-eligible")
+        scheduler.disaggregation_mode = DisaggregationMode.DECODE
+        scheduler.running_batch = types.SimpleNamespace(reqs=[])
+        scheduler.waiting_queue = [waiting_req]
+        scheduler.server_args = types.SimpleNamespace(disaggregation_bootstrap_port=8998)
+        scheduler.ps = types.SimpleNamespace(attn_dp_rank=0, dp_rank=0)
+        captured = {}
+
+        def fake_start(reqs, manifests):
+            captured["rank_at_sender_start"] = reqs[0].pd_flip_target_decode_dp_rank
+            captured["manifest_rank"] = manifests[0]["target_decode_dp_rank"]
+            return {}, ""
+
+        scheduler._pd_flip_start_source_entries = fake_start
+
+        output = Scheduler.start_pd_flip_migration_source(
+            scheduler,
+            PDFlipMigrationSourceStartReq(
+                session_id="session-rank-map",
+                target_url="http://target",
+                include_waiting=True,
+                target_decode_dp_ranks={"waiting-eligible": 6},
+            ),
+        )
+
+        self.assertTrue(output.success)
+        self.assertEqual(captured["rank_at_sender_start"], 6)
+        self.assertEqual(captured["manifest_rank"], 6)
+
     def test_abort_restores_frozen_waiting_reqs(self):
         scheduler = Scheduler.__new__(Scheduler)
         before = self._waiting_req("before")
