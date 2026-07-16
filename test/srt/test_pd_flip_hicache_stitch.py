@@ -719,6 +719,11 @@ def test_non_stitch_prepare_then_commit_validates_committed_mapping():
         ),
         _pd_flip_migration_status_dict=lambda: {},
         _pd_flip_note_timing=lambda *args: None,
+        _pd_flip_partition_rids=lambda rids, local: {
+            "dp_rank": 0,
+            "handled_rids": list(local if rids is None else rids),
+            "ignored_rids": [],
+        },
     )
     scheduler._pd_flip_invalid_kv_positions = types.MethodType(
         _load_class_method(
@@ -938,6 +943,7 @@ def test_source_full_fallback_rebuilds_sender_and_metadata():
         "sender": old_sender,
         "metadata_index": 1,
         "migration_bootstrap_room": 9,
+        "manifest": {},
     }
     session = {"source_entries": {"req": entry}, "transferred_rids": {"req"}}
     scheduler = types.SimpleNamespace(
@@ -948,6 +954,7 @@ def test_source_full_fallback_rebuilds_sender_and_metadata():
         _pd_flip_local_bootstrap_addr=lambda manager: "host:1",
         _pd_flip_free_source_metadata=lambda entry: entry.update(metadata_freed=True),
         _pd_flip_note_timing=lambda *args: None,
+        _pd_flip_dest_ranks=lambda manifest: [0],
     )
     rebuild = _load_class_method(
         SCHEDULER_PATH,
@@ -978,6 +985,7 @@ def test_source_full_fallback_rebuild_failure_rolls_back_entry():
         "sender": types.SimpleNamespace(abort=lambda: events.append("old_abort")),
         "metadata_index": 1,
         "migration_bootstrap_room": 9,
+        "manifest": {},
     }
     session = {"source_entries": {"req": entry}}
     scheduler = types.SimpleNamespace(
@@ -1021,6 +1029,7 @@ def test_source_fallback_sender_constructor_failure_frees_new_metadata():
         "sender": types.SimpleNamespace(abort=lambda: events.append("old_abort")),
         "metadata_index": 1,
         "migration_bootstrap_room": 9,
+        "manifest": {},
     }
     session = {"source_entries": {"req": entry}}
 
@@ -1035,6 +1044,7 @@ def test_source_fallback_sender_constructor_failure_frees_new_metadata():
         _pd_flip_get_source_kv_manager=lambda: "manager",
         _pd_flip_local_bootstrap_addr=lambda manager: "host:1",
         _pd_flip_free_source_metadata=free_metadata,
+        _pd_flip_dest_ranks=lambda manifest: [0],
     )
     rebuild = _load_class_method(
         SCHEDULER_PATH,

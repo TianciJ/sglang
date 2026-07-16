@@ -745,6 +745,15 @@ def test_prefill_donor_entry_builds_truncated_prompt_sender():
         _pd_flip_manifest_to_req=manifest_to_req,
         req_to_metadata_buffer_idx_allocator=_Allocator([7]),
         ps=types.SimpleNamespace(tp_rank=2, pp_rank=0),
+        server_args=types.SimpleNamespace(dp_size=8),
+    )
+    scheduler._pd_flip_dest_ranks = types.MethodType(
+        _load_class_method(
+            SCHEDULER_PATH,
+            "Scheduler",
+            "_pd_flip_dest_ranks",
+        ),
+        scheduler,
     )
     manifest = {
         "rid": "r0",
@@ -755,6 +764,7 @@ def test_prefill_donor_entry_builds_truncated_prompt_sender():
         "prefill_donor_bootstrap_room": 1700,
         "prefill_donor_end": 1920,
         "kv_committed_len": 2073,
+        "target_decode_dp_rank": 6,
     }
     kv_manager = object()
 
@@ -764,7 +774,7 @@ def test_prefill_donor_entry_builds_truncated_prompt_sender():
     assert entry["req"].output_ids == []
     assert entry["req"].kv_committed_len == 1920
     assert entry["sender"].bootstrap_room == 1700
-    assert entry["sender"].dest_tp_ranks == [2]
+    assert entry["sender"].dest_tp_ranks == [6]
     assert entry["metadata_index"] == 7
     assert entry["phase"] == "new"
 

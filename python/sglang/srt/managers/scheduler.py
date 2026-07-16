@@ -3535,6 +3535,23 @@ class Scheduler(
             "ignored_rids": [rid for rid in requested if rid not in local],
         }
 
+    def _pd_flip_dest_ranks(self, manifest: Dict[str, Any]) -> List[int]:
+        rank = manifest.get("target_decode_dp_rank")
+        dp_size = int(
+            getattr(getattr(self, "server_args", None), "dp_size", 1) or 1
+        )
+        if rank is None:
+            if dp_size == 1:
+                return [int(getattr(getattr(self, "ps", None), "tp_rank", 0))]
+            raise ValueError(
+                "target_decode_dp_rank is required for DP Attention migration"
+            )
+        if not isinstance(rank, int) or not 0 <= rank < dp_size:
+            raise ValueError(
+                f"target_decode_dp_rank must be in [0, {dp_size}), got {rank!r}"
+            )
+        return [rank]
+
     def _pd_flip_model_fingerprint(self, kv_pool=None) -> str:
         model_config = getattr(self, "model_config", None)
         server_args = getattr(self, "server_args", None)
@@ -3872,7 +3889,7 @@ class Scheduler(
                     mgr=kv_manager,
                     bootstrap_addr=bootstrap_addr,
                     bootstrap_room=migration_room,
-                    dest_tp_ranks=[self.ps.tp_rank],
+                    dest_tp_ranks=self._pd_flip_dest_ranks(manifest),
                     pp_rank=self.ps.pp_rank,
                 )
                 timing_debug["sender_create_s"] = time.monotonic() - sender_started
@@ -3923,7 +3940,7 @@ class Scheduler(
             mgr=kv_manager,
             bootstrap_addr=self._pd_flip_local_bootstrap_addr(kv_manager),
             bootstrap_room=migration_room,
-            dest_tp_ranks=[self.ps.tp_rank],
+            dest_tp_ranks=self._pd_flip_dest_ranks(manifest),
             pp_rank=self.ps.pp_rank,
         )
         from_len = int(manifest.get("delta_from_len") or entry.get("committed_len") or 0)
@@ -4265,7 +4282,7 @@ class Scheduler(
                     mgr=kv_manager,
                     bootstrap_addr=bootstrap_addr,
                     bootstrap_room=int(entry["migration_bootstrap_room"]),
-                    dest_tp_ranks=[self.ps.tp_rank],
+                    dest_tp_ranks=self._pd_flip_dest_ranks(entry["manifest"]),
                     pp_rank=self.ps.pp_rank,
                 )
                 entry.update(
@@ -5580,7 +5597,7 @@ class Scheduler(
                 mgr=kv_manager,
                 bootstrap_addr=bootstrap_addr,
                 bootstrap_room=donor_room,
-                dest_tp_ranks=[self.ps.tp_rank],
+                dest_tp_ranks=self._pd_flip_dest_ranks(manifest),
                 pp_rank=self.ps.pp_rank,
             )
         except Exception:

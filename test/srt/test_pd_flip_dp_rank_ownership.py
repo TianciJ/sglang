@@ -65,3 +65,25 @@ def test_rid_partition_ignores_requests_owned_by_other_ranks():
 
     assert partition["handled_rids"] == ["local"]
     assert partition["ignored_rids"] == ["remote"]
+
+
+def test_transfer_destination_uses_manifest_target_rank():
+    scheduler = make_scheduler(attn_dp_rank=1, dp_size=8)
+    scheduler.ps.tp_rank = 3
+
+    assert scheduler._pd_flip_dest_ranks({"target_decode_dp_rank": 6}) == [6]
+
+
+def test_transfer_destination_requires_target_rank_in_dp8():
+    scheduler = make_scheduler(attn_dp_rank=1, dp_size=8)
+    scheduler.ps.tp_rank = 3
+
+    with pytest.raises(ValueError, match="target_decode_dp_rank"):
+        scheduler._pd_flip_dest_ranks({})
+
+
+def test_transfer_destination_keeps_local_tp_rank_for_dp1():
+    scheduler = make_scheduler(attn_dp_rank=0, dp_size=1)
+    scheduler.ps.tp_rank = 3
+
+    assert scheduler._pd_flip_dest_ranks({}) == [3]
