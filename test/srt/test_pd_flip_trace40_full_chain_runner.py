@@ -82,6 +82,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
                 wave_gap_seconds=6,
                 intra_wave_interval_seconds=0.15,
                 ttft_slo_override_seconds=0.2,
+                tpot_slo_override_seconds=0.05,
                 max_tokens=10000,
                 forced_text="字",
                 forced_token_id=2024,
@@ -101,6 +102,14 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             self.assertEqual(scheduled[30]["arrival_offset_s"], 18.0)
             self.assertAlmostEqual(scheduled[-1]["arrival_offset_s"], 19.35)
             self.assertTrue(all(row["ttft_slo_s"] == 0.2 for row in scheduled))
+            self.assertTrue(all(row["tpot_slo_s"] == 0.05 for row in scheduled))
+            self.assertTrue(
+                all(
+                    row["body"]["custom_params"]["pd_flip_slo"]
+                    == {"ttft_seconds": 0.2, "tpot_seconds": 0.05}
+                    for row in scheduled
+                )
+            )
             self.assertTrue(
                 all(row["body"]["max_tokens"] == 10000 for row in scheduled)
             )
@@ -123,6 +132,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             self.assertEqual(schedule["max_tokens"], 10000)
             self.assertEqual(schedule["forced_token_id"], 2024)
             self.assertEqual(schedule["model"], "deepseek_v3.1_terminus")
+            self.assertEqual(schedule["tpot_slo_override_seconds"], 0.05)
 
     def test_env_example_points_at_current_cluster_layout(self):
         source = ENV_EXAMPLE.read_text(encoding="utf-8")
@@ -136,6 +146,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
         self.assertIn("TRACE_WAVE_SIZE=10", source)
         self.assertIn("TRACE_WAVE_GAP_SECONDS=6", source)
         self.assertIn("TRACE_MAX_TOKENS=10000", source)
+        self.assertIn("TRACE_TPOT_SLO_OVERRIDE_SECONDS=0.05", source)
         self.assertIn("TRACE_FORCED_TEXT=字", source)
         self.assertIn("MODEL_PATH=/models/deepseek_v3.1_terminus", source)
         self.assertIn("MODEL_ID=deepseek_v3.1_terminus", source)
@@ -167,6 +178,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
             "set -Eeuo pipefail",
             "--output-dir '${RUN_DIR}/workload'",
             "--ttft-slo-override-seconds",
+            "--tpot-slo-override-seconds",
             "--model '${MODEL_ID}'",
             "len(rows) == 40",
             "prompt_chars",

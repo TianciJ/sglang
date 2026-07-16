@@ -51,6 +51,7 @@ TRACE_WAVE_SIZE="${TRACE_WAVE_SIZE:-10}"
 TRACE_WAVE_GAP_SECONDS="${TRACE_WAVE_GAP_SECONDS:-6}"
 TRACE_INTRA_WAVE_INTERVAL_SECONDS="${TRACE_INTRA_WAVE_INTERVAL_SECONDS:-0.15}"
 TRACE_TTFT_SLO_OVERRIDE_SECONDS="${TRACE_TTFT_SLO_OVERRIDE_SECONDS:-0}"
+TRACE_TPOT_SLO_OVERRIDE_SECONDS="${TRACE_TPOT_SLO_OVERRIDE_SECONDS:-0.05}"
 TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
 TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-字}"
 MODEL_PATH="${MODEL_PATH:-/models/deepseek_v3.1_terminus}"
@@ -237,7 +238,7 @@ capture_clocks() {
 
 prepare_scheduled_trace() {
   # prepare-trace-in-container: host Python on the ECS nodes is too old.
-  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/trace'; docker run --rm -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v /home/tiancij:/home/tiancij '${IMAGE}' python3 /sgl-workspace/sglang/scripts/playground/disaggregation/pd_flip_prepare_trace.py --source '${TRACE_PATH}' --output '${EFFECTIVE_TRACE}' --manifest '${RUN_DIR}/trace/schedule.json' --wave-size '${TRACE_WAVE_SIZE}' --wave-gap-seconds '${TRACE_WAVE_GAP_SECONDS}' --intra-wave-interval-seconds '${TRACE_INTRA_WAVE_INTERVAL_SECONDS}' --ttft-slo-override-seconds '${TRACE_TTFT_SLO_OVERRIDE_SECONDS}' --max-tokens '${TRACE_MAX_TOKENS}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --model '${MODEL_ID}'; sha256sum '${TRACE_PATH}' > '${RUN_DIR}/trace/source.sha256'; sha256sum '${EFFECTIVE_TRACE}' > '${RUN_DIR}/trace/effective.sha256'"
+  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/trace'; docker run --rm -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v /home/tiancij:/home/tiancij '${IMAGE}' python3 /sgl-workspace/sglang/scripts/playground/disaggregation/pd_flip_prepare_trace.py --source '${TRACE_PATH}' --output '${EFFECTIVE_TRACE}' --manifest '${RUN_DIR}/trace/schedule.json' --wave-size '${TRACE_WAVE_SIZE}' --wave-gap-seconds '${TRACE_WAVE_GAP_SECONDS}' --intra-wave-interval-seconds '${TRACE_INTRA_WAVE_INTERVAL_SECONDS}' --ttft-slo-override-seconds '${TRACE_TTFT_SLO_OVERRIDE_SECONDS}' --tpot-slo-override-seconds '${TRACE_TPOT_SLO_OVERRIDE_SECONDS}' --max-tokens '${TRACE_MAX_TOKENS}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --model '${MODEL_ID}'; sha256sum '${TRACE_PATH}' > '${RUN_DIR}/trace/source.sha256'; sha256sum '${EFFECTIVE_TRACE}' > '${RUN_DIR}/trace/effective.sha256'"
 }
 
 start_shared_stack() {

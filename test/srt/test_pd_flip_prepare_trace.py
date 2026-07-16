@@ -209,6 +209,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 wave_size=10,
                 wave_gap_seconds=6.0,
                 intra_wave_interval_seconds=0.1,
+                tpot_slo_override_seconds=0.05,
                 max_tokens=10000,
                 forced_text="字",
                 forced_token_id=2024,
@@ -245,6 +246,15 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         self.assertEqual(schedule["forced_text"], "字")
         self.assertEqual(schedule["forced_token_id"], 2024)
         self.assertEqual(schedule["model"], "deepseek_v3.1_terminus")
+        self.assertEqual(schedule["tpot_slo_override_seconds"], 0.05)
+        self.assertTrue(all(row["tpot_slo_s"] == 0.05 for row in rows))
+        self.assertTrue(
+            all(
+                row["body"]["custom_params"]["pd_flip_slo"]["tpot_seconds"]
+                == 0.05
+                for row in rows
+            )
+        )
 
     def test_cli_requires_deepseek_output_contract_inputs(self):
         from scripts.playground.disaggregation.pd_flip_prepare_trace import (
@@ -271,6 +281,8 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
                 "字",
                 "--tokenizer-path",
                 "/models/deepseek_v3.1_terminus",
+                "--tpot-slo-override-seconds",
+                "0.05",
                 "--model",
                 "deepseek_v3.1_terminus",
             ]
@@ -280,6 +292,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         self.assertEqual(args.forced_text, "字")
         self.assertEqual(str(args.tokenizer_path), "/models/deepseek_v3.1_terminus")
         self.assertEqual(args.model, "deepseek_v3.1_terminus")
+        self.assertEqual(args.tpot_slo_override_seconds, 0.05)
 
 
 if __name__ == "__main__":
