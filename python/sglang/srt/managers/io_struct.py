@@ -1850,6 +1850,9 @@ class PDFlipMigrationReqOutput(BaseReq):
     message: str = ""
     status: Dict[str, Any] = field(default_factory=dict)
     manifests: List[Dict[str, Any]] = field(default_factory=list)
+    dp_rank: Optional[int] = None
+    handled_rids: List[str] = field(default_factory=list)
+    ignored_rids: List[str] = field(default_factory=list)
 
 
 @dataclass

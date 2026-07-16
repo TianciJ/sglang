@@ -2143,6 +2143,8 @@ class Scheduler(
             "source_waiting_reqs": source_waiting_reqs,
             "timing_debug": timing_debug,
             "prefill_donor_mode": prefill_donor_mode,
+            "handled_rids": [str(manifest.get("rid") or "") for manifest in manifests],
+            "ignored_rids": [],
         }
         self.pd_flip_migration_session = session
         if real_entries:
@@ -2155,6 +2157,8 @@ class Scheduler(
             message=real_error or "source migration session started",
             status=self._pd_flip_migration_status_dict(),
             manifests=manifests,
+            dp_rank=self._pd_flip_attn_dp_rank(),
+            handled_rids=list(session["handled_rids"]),
         )
 
     def prepare_pd_flip_migration_target(
@@ -2209,7 +2213,20 @@ class Scheduler(
             )
 
         session_id = recv_req.session_id or f"pd-flip-target-{int(time.time() * 1000)}"
-        manifests = list(recv_req.manifests or [])
+        all_manifests = list(recv_req.manifests or [])
+        try:
+            partition = self._pd_flip_partition_manifests(
+                all_manifests, "target_decode_dp_rank"
+            )
+        except ValueError as exc:
+            return PDFlipMigrationReqOutput(
+                success=False,
+                message=str(exc),
+                status=self._pd_flip_migration_status_dict(),
+                manifests=all_manifests,
+                dp_rank=self._pd_flip_attn_dp_rank(),
+            )
+        manifests = partition["manifests"]
         for manifest in manifests:
             manifest_session_id = manifest.get("pd_flip_session_id")
             if manifest_session_id is not None and str(manifest_session_id) != str(
@@ -2254,6 +2271,8 @@ class Scheduler(
             "target_entries": target_entries,
             "timing_debug": timing_debug,
             "prefill_donor_mode": prefill_donor_mode,
+            "handled_rids": partition["handled_rids"],
+            "ignored_rids": partition["ignored_rids"],
         }
         if target_entries:
             self._pd_flip_target_pump_transfer(self.pd_flip_migration_session)
@@ -2262,6 +2281,9 @@ class Scheduler(
             message=real_error or "target migration session prepared",
             status=self._pd_flip_migration_status_dict(),
             manifests=manifests,
+            dp_rank=partition["dp_rank"],
+            handled_rids=partition["handled_rids"],
+            ignored_rids=partition["ignored_rids"],
         )
 
     def _pd_flip_pump_prefill_donor_session(
@@ -2293,7 +2315,13 @@ class Scheduler(
     def _pd_flip_prefill_donor_status_dict(self) -> Dict[str, Any]:
         session = getattr(self, "pd_flip_prefill_donor_session", None)
         if not session:
-            return {"state": "idle", "role": "prefill_donor"}
+            return {
+                "state": "idle",
+                "role": "prefill_donor",
+                "dp_rank": self._pd_flip_attn_dp_rank(),
+                "handled_rids": [],
+                "ignored_rids": [],
+            }
         entries = session.get("entries") or {}
 
         def elapsed(entry: Dict[str, Any], start: str, end: str):
@@ -2314,6 +2342,9 @@ class Scheduler(
             "transferred_reqs": int(session.get("transferred_reqs", 0) or 0),
             "failed_reqs": int(session.get("failed_reqs", 0) or 0),
             "last_error": session.get("last_error", ""),
+            "dp_rank": self._pd_flip_attn_dp_rank(),
+            "handled_rids": list(session.get("handled_rids") or entries.keys()),
+            "ignored_rids": list(session.get("ignored_rids") or []),
             "entries": {
                 rid: dict(
                     {
@@ -2390,13 +2421,26 @@ class Scheduler(
                     status=self._pd_flip_prefill_donor_status_dict(),
                 )
 
-        manifests = list(recv_req.manifests or [])
-        if not manifests:
+        all_manifests = list(recv_req.manifests or [])
+        if not all_manifests:
             return PDFlipMigrationReqOutput(
                 False,
                 "prefill donor manifests are empty",
                 status=self._pd_flip_prefill_donor_status_dict(),
             )
+        try:
+            partition = self._pd_flip_partition_manifests(
+                all_manifests, "prefill_donor_dp_rank"
+            )
+        except ValueError as exc:
+            return PDFlipMigrationReqOutput(
+                False,
+                str(exc),
+                status=self._pd_flip_prefill_donor_status_dict(),
+                manifests=all_manifests,
+                dp_rank=self._pd_flip_attn_dp_rank(),
+            )
+        manifests = partition["manifests"]
         entries = {}
         try:
             kv_manager = self._pd_flip_get_source_kv_manager()
@@ -2454,6 +2498,8 @@ class Scheduler(
             "transferred_reqs": 0,
             "failed_reqs": 0,
             "last_error": "",
+            "handled_rids": partition["handled_rids"],
+            "ignored_rids": partition["ignored_rids"],
         }
         self._pd_flip_pump_prefill_donor_session(
             self.pd_flip_prefill_donor_session
@@ -2464,6 +2510,9 @@ class Scheduler(
             "prefill donor session started",
             status=status,
             manifests=manifests,
+            dp_rank=partition["dp_rank"],
+            handled_rids=partition["handled_rids"],
+            ignored_rids=partition["ignored_rids"],
         )
 
     def get_pd_flip_prefill_donor_status(
@@ -2574,6 +2623,22 @@ class Scheduler(
                 )
             manifest["pd_flip_session_id"] = session.get("session_id")
             manifests.append(manifest)
+        try:
+            partition = self._pd_flip_partition_manifests(
+                manifests, "target_decode_dp_rank"
+            )
+        except ValueError as exc:
+            return PDFlipMigrationReqOutput(
+                success=False,
+                message=str(exc),
+                status=self._pd_flip_migration_status_dict(),
+                manifests=manifests,
+                dp_rank=self._pd_flip_attn_dp_rank(),
+            )
+        manifests = partition["manifests"]
+        session["ignored_rids"] = sorted(
+            set(session.get("ignored_rids") or []).union(partition["ignored_rids"])
+        )
         signature = self._pd_flip_delta_manifest_signature(manifests)
         existing_signature = session.get("target_delta_manifest_signature")
         if existing_signature is not None:
@@ -2647,6 +2712,9 @@ class Scheduler(
             message=real_error or "target migration delta prepared",
             status=self._pd_flip_migration_status_dict(),
             manifests=manifests,
+            dp_rank=partition["dp_rank"],
+            handled_rids=partition["handled_rids"],
+            ignored_rids=partition["ignored_rids"],
         )
 
     @staticmethod
@@ -2693,10 +2761,19 @@ class Scheduler(
         self._pd_flip_note_timing(session, "commit_received")
         self._pd_flip_target_pump_transfer(session)
         entries = session.get("target_entries") or {}
-        requested_rids = [
-            str(rid)
-            for rid in (entries.keys() if recv_req.rids is None else recv_req.rids)
-        ]
+        rid_partition = self._pd_flip_partition_rids(recv_req.rids, entries.keys())
+        requested_rids = rid_partition["handled_rids"]
+        if not entries:
+            session["state"] = "ready_to_activate"
+            return PDFlipMigrationReqOutput(
+                success=True,
+                message="target rank has no local requests to commit",
+                status=self._pd_flip_migration_status_dict(),
+                manifests=[],
+                dp_rank=rid_partition["dp_rank"],
+                handled_rids=[],
+                ignored_rids=rid_partition["ignored_rids"],
+            )
         requested = set(requested_rids)
         if (
             not requested_rids
@@ -2738,6 +2815,9 @@ class Scheduler(
             message="target batch ready to activate",
             status=self._pd_flip_migration_status_dict(),
             manifests=list(session.get("manifests", [])),
+            dp_rank=rid_partition["dp_rank"],
+            handled_rids=rid_partition["handled_rids"],
+            ignored_rids=rid_partition["ignored_rids"],
         )
 
     def activate_pd_flip_migration_target(
@@ -2772,10 +2852,19 @@ class Scheduler(
             )
 
         entries = session.get("target_entries") or {}
-        requested_rids = [
-            str(rid)
-            for rid in (entries.keys() if recv_req.rids is None else recv_req.rids)
-        ]
+        rid_partition = self._pd_flip_partition_rids(recv_req.rids, entries.keys())
+        requested_rids = rid_partition["handled_rids"]
+        if not entries:
+            session["state"] = "active"
+            return PDFlipMigrationReqOutput(
+                success=True,
+                message="target rank has no local requests to activate",
+                status=self._pd_flip_migration_status_dict(),
+                manifests=[],
+                dp_rank=rid_partition["dp_rank"],
+                handled_rids=[],
+                ignored_rids=rid_partition["ignored_rids"],
+            )
         requested = set(requested_rids)
         if (
             not requested_rids
@@ -2898,6 +2987,9 @@ class Scheduler(
             message="target batch activated",
             status=self._pd_flip_migration_status_dict(),
             manifests=list(session.get("manifests", [])),
+            dp_rank=rid_partition["dp_rank"],
+            handled_rids=rid_partition["handled_rids"],
+            ignored_rids=rid_partition["ignored_rids"],
         )
 
     def abort_pd_flip_migration_target(
@@ -3123,10 +3215,18 @@ class Scheduler(
 
         self._pd_flip_source_pump_transfer(session)
         entries = session.get("source_entries") or {}
-        requested_rids = [
-            str(rid)
-            for rid in (entries.keys() if recv_req.rids is None else recv_req.rids)
-        ]
+        rid_partition = self._pd_flip_partition_rids(recv_req.rids, entries.keys())
+        requested_rids = rid_partition["handled_rids"]
+        if not entries:
+            return PDFlipMigrationReqOutput(
+                success=True,
+                message="no local source delta requests",
+                status=self._pd_flip_migration_status_dict(),
+                manifests=[],
+                dp_rank=rid_partition["dp_rank"],
+                handled_rids=[],
+                ignored_rids=rid_partition["ignored_rids"],
+            )
         requested = set(requested_rids)
         if (
             not requested_rids
@@ -3239,6 +3339,9 @@ class Scheduler(
             message=real_error or "source migration delta started",
             status=self._pd_flip_migration_status_dict(),
             manifests=delta_manifests,
+            dp_rank=rid_partition["dp_rank"],
+            handled_rids=rid_partition["handled_rids"],
+            ignored_rids=rid_partition["ignored_rids"],
         )
 
     def _pd_flip_request_batch_quiesce(self, session_id: str, rids) -> None:
@@ -3382,6 +3485,55 @@ class Scheduler(
         if rank is None:
             rank = getattr(ps, "dp_rank", 0)
         return int(rank or 0)
+
+    def _pd_flip_partition_manifests(
+        self, manifests: List[Dict[str, Any]], field: str
+    ) -> Dict[str, Any]:
+        local_rank = self._pd_flip_attn_dp_rank()
+        dp_size = int(
+            getattr(getattr(self, "server_args", None), "dp_size", 1) or 1
+        )
+        selected = []
+        handled_rids = []
+        ignored_rids = []
+        for manifest in manifests:
+            rank = manifest.get(field)
+            if rank is None:
+                if dp_size != 1:
+                    raise ValueError(f"{field} is required when dp_size={dp_size}")
+                rank = 0
+            if not isinstance(rank, int) or not 0 <= rank < dp_size:
+                raise ValueError(
+                    f"{field} must be in [0, {dp_size}), got {rank!r}"
+                )
+            rid = str(manifest.get("rid") or "")
+            if rank == local_rank:
+                selected.append(manifest)
+                handled_rids.append(rid)
+            else:
+                ignored_rids.append(rid)
+        return {
+            "dp_rank": local_rank,
+            "manifests": selected,
+            "handled_rids": handled_rids,
+            "ignored_rids": ignored_rids,
+        }
+
+    def _pd_flip_manifests_for_rank(
+        self, manifests: List[Dict[str, Any]], field: str
+    ) -> List[Dict[str, Any]]:
+        return self._pd_flip_partition_manifests(manifests, field)["manifests"]
+
+    def _pd_flip_partition_rids(self, rids, local_rids) -> Dict[str, Any]:
+        local = {str(rid) for rid in local_rids}
+        requested = (
+            sorted(local) if rids is None else [str(rid) for rid in rids]
+        )
+        return {
+            "dp_rank": self._pd_flip_attn_dp_rank(),
+            "handled_rids": [rid for rid in requested if rid in local],
+            "ignored_rids": [rid for rid in requested if rid not in local],
+        }
 
     def _pd_flip_model_fingerprint(self, kv_pool=None) -> str:
         model_config = getattr(self, "model_config", None)
@@ -6319,6 +6471,9 @@ class Scheduler(
                 "fallback_reason": "",
                 "rollover_blockers": [],
                 "request_measurements": [],
+                "dp_rank": self._pd_flip_attn_dp_rank(),
+                "handled_rids": [],
+                "ignored_rids": [],
                 "session_archive": list(
                     getattr(self, "pd_flip_migration_session_archive", [])
                 ),
@@ -6337,6 +6492,9 @@ class Scheduler(
             "last_error": session.get("last_error", ""),
             "dry_run": bool(session.get("dry_run", False)),
             "prepare_only": bool(session.get("prepare_only", False)),
+            "dp_rank": self._pd_flip_attn_dp_rank(),
+            "handled_rids": list(session.get("handled_rids") or []),
+            "ignored_rids": list(session.get("ignored_rids") or []),
             "waiting_reqs": int(session_timing.get("waiting_reqs", 0) or 0),
             "waiting_manifest_count": int(
                 session_timing.get("waiting_manifest_count", 0) or 0
