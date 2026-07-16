@@ -119,7 +119,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
 
         self.assertIn("ADMIN_API_KEY=replace-with", source)
         self.assertIn("IMAGE=sglang-pd-switch:tianciJ", source)
-        self.assertIn("SGLANG_REPO=/home/tiancij/sglang-pd-e9c4472c3", source)
+        self.assertIn("SGLANG_REPO=/home/tiancij/sglang-pd-deepseek-dp8", source)
         self.assertIn("trace_interleaved_long_decode.jsonl", source)
         self.assertIn("PD_FLIP_FIRST_MIGRATION_RATIO=0.5", source)
         self.assertIn("PD_FLIP_OBSERVATION_SECONDS=10", source)
