@@ -4608,14 +4608,35 @@ class Scheduler(
     def _pd_flip_manifest_to_req(
         self, manifest: Dict[str, Any], source_host: str
     ) -> Req:
-        sampling_params = self._pd_flip_deserialize_sampling_params(
-            manifest.get("sampling_params") or {}
-        )
+        sampling_values = manifest.get("sampling_params") or {}
+        custom_params = sampling_values.get("custom_params")
+        if isinstance(custom_params, dict) and "forced_token_id" in custom_params:
+            custom_logit_processor = manifest.get("custom_logit_processor")
+            if (
+                not isinstance(custom_logit_processor, str)
+                or not custom_logit_processor
+            ):
+                raise ValueError(
+                    "forced sampling manifest requires custom_logit_processor"
+                )
+
+            forced_token_id = custom_params["forced_token_id"]
+            if not isinstance(forced_token_id, int) or not (
+                0 <= forced_token_id < self.model_config.vocab_size
+            ):
+                raise ValueError(
+                    f"forced_token_id {forced_token_id!r} is outside vocab_size "
+                    f"{self.model_config.vocab_size}"
+                )
+
+        sampling_params = self._pd_flip_deserialize_sampling_params(sampling_values)
         try:
             sampling_params.normalize(getattr(self, "tokenizer", None))
             sampling_params.verify(self.model_config.vocab_size)
         except Exception:
-            logger.debug("Skipping sampling param normalize/verify for migration", exc_info=True)
+            logger.debug(
+                "Skipping sampling param normalize/verify for migration", exc_info=True
+            )
 
         req = Req(
             str(manifest.get("rid", "")),
@@ -4638,6 +4659,7 @@ class Scheduler(
             disagg_mode=self.disaggregation_mode,
             vocab_size=self.model_config.vocab_size,
             priority=manifest.get("priority"),
+            custom_logit_processor=manifest.get("custom_logit_processor"),
             metrics_collector=(
                 self.metrics_collector
                 if getattr(self.metrics_reporter, "enable_metrics", False)
@@ -6112,6 +6134,7 @@ class Scheduler(
             "sampling_params": self._pd_flip_serialize_sampling_params(
                 getattr(req, "sampling_params", None)
             ),
+            "custom_logit_processor": getattr(req, "custom_logit_processor", None),
             "last_emitted_output_seq": int(
                 getattr(req, "pd_flip_last_emitted_output_seq", 0) or 0
             ),
@@ -6136,15 +6159,25 @@ class Scheduler(
     def _pd_flip_json_safe_dict(values: Dict[str, Any]) -> Dict[str, Any]:
         safe = {}
         for key, value in dict(values).items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                safe[key] = value
-            elif isinstance(value, (list, tuple)):
-                if all(
-                    isinstance(item, (str, int, float, bool)) or item is None
-                    for item in value
-                ):
-                    safe[key] = list(value)
+            if str(key) == "__req__":
+                continue
+            try:
+                safe[key] = Scheduler._pd_flip_json_safe_value(value)
+            except TypeError:
+                continue
         return safe
+
+    @staticmethod
+    def _pd_flip_json_safe_value(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [Scheduler._pd_flip_json_safe_value(item) for item in value]
+        if isinstance(value, set):
+            return [Scheduler._pd_flip_json_safe_value(item) for item in sorted(value)]
+        if isinstance(value, dict):
+            return Scheduler._pd_flip_json_safe_dict(value)
+        raise TypeError(f"unsupported PD Flip manifest value: {type(value).__name__}")
 
     def _pd_flip_migration_status_dict(self) -> Dict[str, Any]:
         session = getattr(self, "pd_flip_migration_session", None)

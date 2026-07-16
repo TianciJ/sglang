@@ -1,5 +1,6 @@
 import ast
 import copy
+import json
 import os
 import pathlib
 import sys
@@ -25,6 +26,7 @@ try:
     )
     from sglang.srt.managers.scheduler import Scheduler
     from sglang.srt.managers.tokenizer_manager import TokenizerManager
+    from sglang.srt.sampling.sampling_params import SamplingParams
 
     RUNTIME_IMPORT_ERROR = None
 except ModuleNotFoundError as exc:
@@ -82,6 +84,7 @@ except ModuleNotFoundError as exc:
     for method_name in fallback_method_names:
         setattr(Scheduler, method_name, fallback_namespace[method_name])
     TokenizerManager = None
+    SamplingParams = None
     PDFlipMigrationTargetCommitReq = types.SimpleNamespace
     PDFlipMigrationSourceDeltaReq = types.SimpleNamespace
 
@@ -358,6 +361,87 @@ class TestAtomicTargetHandoff(unittest.TestCase):
 
         self.assertFalse(out.success)
         self.assertEqual(scheduler.waiting_queue, [])
+
+
+@unittest.skipIf(RUNTIME_IMPORT_ERROR is not None, str(RUNTIME_IMPORT_ERROR))
+class TestMigrationSamplingState(unittest.TestCase):
+    @staticmethod
+    def _scheduler():
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.tokenizer = None
+        scheduler.model_config = types.SimpleNamespace(
+            vocab_size=100000,
+            hf_eos_token_id={0},
+        )
+        scheduler.server_args = types.SimpleNamespace(
+            disaggregation_bootstrap_port=8998
+        )
+        scheduler.disaggregation_mode = None
+        scheduler.metrics_reporter = types.SimpleNamespace(enable_metrics=False)
+        scheduler.metrics_collector = None
+        return scheduler
+
+    def test_manifest_round_trip_preserves_forced_sampling_state(self):
+        scheduler = self._scheduler()
+
+        sampling_params = SamplingParams(
+            max_new_tokens=10000,
+            temperature=0.0,
+            ignore_eos=True,
+            custom_params={
+                "forced_token_id": 2024,
+                "forced_text": "字",
+                "__req__": object(),
+            },
+        )
+        source_req = types.SimpleNamespace(
+            rid="forced-rid",
+            origin_input_ids=[10, 11],
+            output_ids=[2024, 2024, 2024],
+            sampling_params=sampling_params,
+            custom_logit_processor="serialized-forced-processor",
+            stream=True,
+        )
+
+        manifest = scheduler._pd_flip_build_migration_manifest(source_req)
+        json.dumps(manifest)
+        rebuilt = scheduler._pd_flip_manifest_to_req(manifest, "source-host")
+
+        self.assertEqual(
+            manifest["custom_logit_processor"], "serialized-forced-processor"
+        )
+        self.assertNotIn("__req__", manifest["sampling_params"]["custom_params"])
+        self.assertEqual(rebuilt.custom_logit_processor, "serialized-forced-processor")
+        self.assertEqual(rebuilt.sampling_params.max_new_tokens, 10000)
+        self.assertTrue(rebuilt.sampling_params.ignore_eos)
+        self.assertEqual(rebuilt.sampling_params.custom_params["forced_token_id"], 2024)
+        self.assertEqual(rebuilt.sampling_params.custom_params["forced_text"], "字")
+        self.assertIs(rebuilt.sampling_params.custom_params["__req__"], rebuilt)
+
+    def test_target_rejects_incomplete_forced_sampling_manifest(self):
+        scheduler = self._scheduler()
+        manifest = {
+            "rid": "forced-rid",
+            "origin_input_ids": [10, 11],
+            "output_ids": [2024],
+            "sampling_params": {
+                "max_new_tokens": 10000,
+                "ignore_eos": True,
+                "custom_params": {
+                    "forced_token_id": 2024,
+                    "forced_text": "字",
+                },
+            },
+            "custom_logit_processor": None,
+        }
+
+        with self.assertRaisesRegex(ValueError, "custom_logit_processor"):
+            scheduler._pd_flip_manifest_to_req(manifest, "source-host")
+
+        manifest["custom_logit_processor"] = "serialized-forced-processor"
+        manifest["sampling_params"]["custom_params"]["forced_token_id"] = 100000
+        with self.assertRaisesRegex(ValueError, "forced_token_id"):
+            scheduler._pd_flip_manifest_to_req(manifest, "source-host")
 
 
 class TestSourceQuiesce(unittest.TestCase):
