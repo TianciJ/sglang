@@ -68,10 +68,13 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         )
 
         self.assertEqual(row["max_tokens"], 10000)
+        self.assertTrue(row["stream"])
         self.assertEqual(row["body"]["max_tokens"], 10000)
+        self.assertTrue(row["body"]["stream"])
         self.assertEqual(row["body"]["temperature"], 0.0)
         self.assertTrue(row["body"]["ignore_eos"])
         self.assertIsNone(row["body"]["stop"])
+        self.assertEqual(row["body"]["stream_options"], {"include_usage": True})
         self.assertEqual(row["body"]["custom_logit_processor"], "serialized-processor")
         self.assertEqual(row["body"]["custom_params"]["forced_token_id"], 2024)
         self.assertEqual(row["body"]["custom_params"]["forced_text"], "字")
@@ -123,6 +126,32 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "Prompt"):
             _validate_trace(rows)
+
+    def test_validate_output_contract_rejects_any_row_mismatch(self):
+        from scripts.playground.disaggregation.pd_flip_prepare_trace import (
+            _validate_output_contract,
+            apply_output_contract,
+        )
+
+        rows = self._source_rows()
+        for row in rows:
+            apply_output_contract(
+                row,
+                max_tokens=10000,
+                forced_text="字",
+                forced_token_id=2024,
+                custom_logit_processor="serialized-processor",
+            )
+        rows[17]["body"]["max_tokens"] = 9999
+
+        with self.assertRaisesRegex(ValueError, "max_tokens"):
+            _validate_output_contract(
+                rows,
+                max_tokens=10000,
+                forced_text="字",
+                forced_token_id=2024,
+                custom_logit_processor="serialized-processor",
+            )
 
     def test_prepare_trace_applies_forced_output_contract_to_all_rows(self):
         from scripts.playground.disaggregation.pd_flip_prepare_trace import (

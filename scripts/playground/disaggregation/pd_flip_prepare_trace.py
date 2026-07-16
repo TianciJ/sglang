@@ -54,10 +54,13 @@ def apply_output_contract(
     body = row.setdefault("body", {})
     custom_params = body.setdefault("custom_params", {})
     row["max_tokens"] = max_tokens
+    row["stream"] = True
     body["max_tokens"] = max_tokens
     body["temperature"] = 0.0
+    body["stream"] = True
     body["ignore_eos"] = True
     body["stop"] = None
+    body["stream_options"] = {"include_usage": True}
     body["custom_logit_processor"] = custom_logit_processor
     custom_params["forced_text"] = forced_text
     custom_params["forced_token_id"] = forced_token_id
@@ -94,6 +97,35 @@ def _validate_trace(rows: list[dict[str, Any]]) -> None:
         for row in rows
     ):
         raise ValueError("every request needs positive TTFT and TPOT SLO values")
+
+
+def _validate_output_contract(
+    rows: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+    forced_text: str,
+    forced_token_id: int,
+    custom_logit_processor: str,
+) -> None:
+    for index, row in enumerate(rows):
+        body = row.get("body") or {}
+        custom_params = body.get("custom_params") or {}
+        if row.get("max_tokens") != max_tokens or body.get("max_tokens") != max_tokens:
+            raise ValueError(f"request {index} max_tokens contract mismatch")
+        if row.get("stream") is not True or body.get("stream") is not True:
+            raise ValueError(f"request {index} must use streaming")
+        if body.get("temperature") != 0.0:
+            raise ValueError(f"request {index} temperature contract mismatch")
+        if body.get("ignore_eos") is not True or body.get("stop") is not None:
+            raise ValueError(f"request {index} EOS/stop contract mismatch")
+        if body.get("stream_options") != {"include_usage": True}:
+            raise ValueError(f"request {index} must request streaming usage")
+        if body.get("custom_logit_processor") != custom_logit_processor:
+            raise ValueError(f"request {index} custom_logit_processor mismatch")
+        if custom_params.get("forced_text") != forced_text:
+            raise ValueError(f"request {index} forced_text mismatch")
+        if custom_params.get("forced_token_id") != forced_token_id:
+            raise ValueError(f"request {index} forced_token_id mismatch")
 
 
 def prepare_trace(
@@ -151,6 +183,14 @@ def prepare_trace(
 
     reloaded = _load_jsonl(output)
     _validate_trace(reloaded)
+    if max_tokens is not None:
+        _validate_output_contract(
+            reloaded,
+            max_tokens=max_tokens,
+            forced_text=forced_text or "",
+            forced_token_id=(forced_token_id if forced_token_id is not None else -1),
+            custom_logit_processor=custom_logit_processor or "",
+        )
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         json.dumps(

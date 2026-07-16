@@ -105,6 +105,12 @@ class PDFlipTraceReplayTest(unittest.TestCase):
         self.assertTrue(all(row["body"]["stop"] is None for row in trace))
         self.assertTrue(
             all(
+                row["body"]["stream_options"] == {"include_usage": True}
+                for row in trace
+            )
+        )
+        self.assertTrue(
+            all(
                 row["body"]["custom_params"]["forced_token_id"] == 1234 for row in trace
             )
         )
@@ -147,6 +153,43 @@ class PDFlipTraceReplayTest(unittest.TestCase):
         self.assertEqual(args.max_tokens, 10000)
         self.assertEqual(args.forced_text, "字")
         self.assertEqual(args.forced_token_id, 1234)
+
+    def test_compact_output_evidence_uses_usage_and_omits_full_text(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            build_output_evidence,
+        )
+
+        evidence = build_output_evidence(
+            ["字"] * 10000,
+            expected_tokens=10000,
+            forced_text="字",
+            usage_completion_tokens=10000,
+        )
+
+        self.assertEqual(evidence["completion_tokens"], 10000)
+        self.assertEqual(evidence["completion_tokens_source"], "usage")
+        self.assertTrue(evidence["completion_token_match"])
+        self.assertEqual(evidence["forced_text_mismatch_count"], 0)
+        self.assertLessEqual(len(evidence["output_first"]), 32)
+        self.assertLessEqual(len(evidence["output_last"]), 32)
+        self.assertEqual(len(evidence["output_sha256"]), 64)
+        self.assertNotIn("content", evidence)
+        self.assertNotIn("output_text", evidence)
+
+    def test_compact_output_evidence_detects_wrong_output(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            build_output_evidence,
+        )
+
+        evidence = build_output_evidence(
+            ["字", "错", "字"],
+            expected_tokens=3,
+            forced_text="字",
+            usage_completion_tokens=2,
+        )
+
+        self.assertFalse(evidence["completion_token_match"])
+        self.assertEqual(evidence["forced_text_mismatch_count"], 1)
 
     def test_extract_non_stream_text_handles_chat_message(self):
         from scripts.playground.disaggregation.pd_flip_trace_replay import (

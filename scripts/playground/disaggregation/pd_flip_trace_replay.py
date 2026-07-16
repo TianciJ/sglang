@@ -7,6 +7,7 @@ keeps Python 3.6 compatibility for older controller hosts.
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import random
@@ -21,6 +22,73 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 JsonDict = Dict[str, Any]
+
+
+class OutputEvidenceBuilder:
+    """Incrementally retain compact evidence for a generated response."""
+
+    def __init__(self, forced_text: Optional[str] = None, sample_chars: int = 32):
+        self.forced_text = forced_text
+        self.sample_chars = sample_chars
+        self._digest = hashlib.sha256()
+        self._first = ""
+        self._last = ""
+        self.stream_events = 0
+        self.forced_text_mismatch_count = 0
+
+    def add(self, text: str) -> None:
+        if not text:
+            return
+        self._digest.update(text.encode("utf-8"))
+        if len(self._first) < self.sample_chars:
+            self._first = (self._first + text)[: self.sample_chars]
+        self._last = (self._last + text)[-self.sample_chars :]
+        self.stream_events += 1
+        if self.forced_text:
+            width = len(self.forced_text)
+            complete = len(text) // width
+            self.forced_text_mismatch_count += sum(
+                text[index * width : (index + 1) * width] != self.forced_text
+                for index in range(complete)
+            )
+            if len(text) % width:
+                self.forced_text_mismatch_count += 1
+
+    def finish(
+        self,
+        expected_tokens: int,
+        usage_completion_tokens: Optional[int] = None,
+    ) -> JsonDict:
+        if usage_completion_tokens is not None:
+            completion_tokens = int(usage_completion_tokens)
+            completion_tokens_source = "usage"
+        else:
+            completion_tokens = self.stream_events
+            completion_tokens_source = "stream_events"
+        return {
+            "completion_tokens": completion_tokens,
+            "completion_tokens_source": completion_tokens_source,
+            "expected_completion_tokens": int(expected_tokens),
+            "completion_token_match": completion_tokens == int(expected_tokens),
+            "output_stream_events": self.stream_events,
+            "output_sha256": self._digest.hexdigest(),
+            "output_first": self._first,
+            "output_last": self._last,
+            "forced_text_mismatch_count": self.forced_text_mismatch_count,
+        }
+
+
+def build_output_evidence(
+    content_chunks: Iterable[str],
+    *,
+    expected_tokens: int,
+    forced_text: Optional[str] = None,
+    usage_completion_tokens: Optional[int] = None,
+) -> JsonDict:
+    builder = OutputEvidenceBuilder(forced_text=forced_text)
+    for chunk in content_chunks:
+        builder.add(chunk)
+    return builder.finish(expected_tokens, usage_completion_tokens)
 
 
 class PromptProfile:
@@ -152,6 +220,7 @@ def build_trace(
         if forced_token_id is not None:
             body["ignore_eos"] = True
             body["stop"] = None
+            body["stream_options"] = {"include_usage": True}
             body["custom_params"].update(
                 {
                     "forced_text": forced_text,
@@ -457,7 +526,9 @@ def _send_one_request(
     first_token_monotonic: Optional[float] = None
     token_times: List[float] = []
     intervals: List[float] = []
-    content_parts: List[str] = []
+    forced_text = record.get("body", {}).get("custom_params", {}).get("forced_text")
+    output_evidence = OutputEvidenceBuilder(forced_text=forced_text)
+    usage_completion_tokens: Optional[int] = None
     finish_reason: Optional[str] = None
     upstream_request_id: Optional[str] = None
     status = "completed"
@@ -476,6 +547,11 @@ def _send_one_request(
                         break
                     chunk = json.loads(data)
                     upstream_request_id = chunk.get("id") or upstream_request_id
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict) and isinstance(
+                        usage.get("completion_tokens"), int
+                    ):
+                        usage_completion_tokens = usage["completion_tokens"]
                     choice = (chunk.get("choices") or [{}])[0]
                     finish_reason = choice.get("finish_reason") or finish_reason
                     token_text = _extract_stream_text(choice)
@@ -487,7 +563,7 @@ def _send_one_request(
                     elif token_times:
                         intervals.append(max(0.0, now - token_times[-1]))
                     token_times.append(now)
-                    content_parts.append(token_text)
+                    output_evidence.add(token_text)
                     _append_ledger(
                         ledger_path,
                         ledger_lock,
@@ -504,6 +580,11 @@ def _send_one_request(
                 raw = response.read().decode("utf-8", errors="replace")
                 chunk = json.loads(raw)
                 upstream_request_id = chunk.get("id") or upstream_request_id
+                usage = chunk.get("usage")
+                if isinstance(usage, dict) and isinstance(
+                    usage.get("completion_tokens"), int
+                ):
+                    usage_completion_tokens = usage["completion_tokens"]
                 choice = (chunk.get("choices") or [{}])[0]
                 finish_reason = choice.get("finish_reason") or finish_reason
                 token_text = _extract_non_stream_text(choice)
@@ -511,7 +592,7 @@ def _send_one_request(
                 if token_text:
                     first_token_monotonic = now
                     token_times.append(now)
-                    content_parts.append(token_text)
+                    output_evidence.add(token_text)
                     _append_ledger(
                         ledger_path,
                         ledger_lock,
@@ -560,13 +641,19 @@ def _send_one_request(
     metrics["end_wall"] = time.time()
     metrics["upstream_request_id"] = upstream_request_id
     metrics["finish_reason"] = finish_reason
+    evidence = output_evidence.finish(
+        int(record.get("body", {}).get("max_tokens") or record.get("max_tokens") or 0),
+        usage_completion_tokens,
+    )
+    metrics.update(evidence)
+    metrics["finish_reason_match"] = finish_reason == "length"
 
     response_record = {
         "request_id": record["request_id"],
         "upstream_request_id": upstream_request_id,
         "status": status,
         "finish_reason": finish_reason,
-        "content": "".join(content_parts),
+        **evidence,
     }
     error_record = (
         {

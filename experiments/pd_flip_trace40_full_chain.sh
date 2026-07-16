@@ -50,6 +50,11 @@ TRACE_WAVE_SIZE="${TRACE_WAVE_SIZE:-10}"
 TRACE_WAVE_GAP_SECONDS="${TRACE_WAVE_GAP_SECONDS:-6}"
 TRACE_INTRA_WAVE_INTERVAL_SECONDS="${TRACE_INTRA_WAVE_INTERVAL_SECONDS:-0.15}"
 TRACE_TTFT_SLO_OVERRIDE_SECONDS="${TRACE_TTFT_SLO_OVERRIDE_SECONDS:-0}"
+TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
+TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-字}"
+MODEL_PATH="${MODEL_PATH:-/models/deepseek_v3.1_terminus}"
+WORKLOAD_TIMEOUT_SECONDS="${WORKLOAD_TIMEOUT_SECONDS:-7200}"
+MEASUREMENT_DURATION_SECONDS="${MEASUREMENT_DURATION_SECONDS:-7200}"
 SSH_OPTIONS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
 CODE_HASH_FILES=(
   python/sglang/srt/server_args.py
@@ -135,6 +140,14 @@ node_is_configured() {
 }
 
 validate_execution_layout() {
+  if [[ ! "${TRACE_MAX_TOKENS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TRACE_MAX_TOKENS must be a positive integer" >&2
+    return 2
+  fi
+  if [[ -z "${TRACE_FORCED_TEXT}" ]]; then
+    echo "TRACE_FORCED_TEXT must be nonempty" >&2
+    return 2
+  fi
   if ! node_is_configured "${SOURCE_NAME}"; then
     echo "unknown PD_FLIP_SOURCE_NAME: ${SOURCE_NAME}" >&2
     return 2
@@ -163,7 +176,7 @@ preflight() {
   log "preflight run_id=${RUN_ID}"
   validate_execution_layout
   for i in "${!HOSTS[@]}"; do
-    remote "${HOSTS[$i]}" "test -d '${SGLANG_REPO}' && docker image inspect '${IMAGE}' >/dev/null && docker inspect '${WORKER_CONTAINERS[$i]}' >/dev/null && (chronyc tracking 2>/dev/null || timedatectl status 2>/dev/null || true)"
+    remote "${HOSTS[$i]}" "test -d '${SGLANG_REPO}' && test -d '${MODEL_PATH}' && docker image inspect '${IMAGE}' >/dev/null && docker inspect '${WORKER_CONTAINERS[$i]}' >/dev/null && (chronyc tracking 2>/dev/null || timedatectl status 2>/dev/null || true)"
   done
   remote "${HOSTS[0]}" "test -s '${TRACE_PATH}' && docker inspect tiancij-pd-router >/dev/null && docker inspect tiancij-pd-store >/dev/null && docker inspect tiancij-pd-master >/dev/null && docker inspect tiancij-pd-metadata >/dev/null"
   remote "${HOSTS[0]}" "python3 -c \"import json; rows=[json.loads(line) for line in open('${TRACE_PATH}', encoding='utf-8') if line.strip()]; assert len(rows) == 40; assert [row.get('prompt_kind') for row in rows] == ['long','short'] * 20; assert sum(row.get('prompt_chars') == 10000 for row in rows) == 20; assert sum(row.get('prompt_chars') == 1000 for row in rows) == 20; assert all(float(row.get('ttft_slo_s', 0)) > 0 and float(row.get('tpot_slo_s', 0)) > 0 for row in rows)\""
@@ -207,7 +220,7 @@ capture_clocks() {
 
 prepare_scheduled_trace() {
   # prepare-trace-in-container: host Python on the ECS nodes is too old.
-  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/trace'; docker run --rm -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' python3 /sgl-workspace/sglang/scripts/playground/disaggregation/pd_flip_prepare_trace.py --source '${TRACE_PATH}' --output '${EFFECTIVE_TRACE}' --manifest '${RUN_DIR}/trace/schedule.json' --wave-size '${TRACE_WAVE_SIZE}' --wave-gap-seconds '${TRACE_WAVE_GAP_SECONDS}' --intra-wave-interval-seconds '${TRACE_INTRA_WAVE_INTERVAL_SECONDS}' --ttft-slo-override-seconds '${TRACE_TTFT_SLO_OVERRIDE_SECONDS}'; sha256sum '${TRACE_PATH}' > '${RUN_DIR}/trace/source.sha256'; sha256sum '${EFFECTIVE_TRACE}' > '${RUN_DIR}/trace/effective.sha256'"
+  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/trace'; docker run --rm -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v /home/tiancij:/home/tiancij '${IMAGE}' python3 /sgl-workspace/sglang/scripts/playground/disaggregation/pd_flip_prepare_trace.py --source '${TRACE_PATH}' --output '${EFFECTIVE_TRACE}' --manifest '${RUN_DIR}/trace/schedule.json' --wave-size '${TRACE_WAVE_SIZE}' --wave-gap-seconds '${TRACE_WAVE_GAP_SECONDS}' --intra-wave-interval-seconds '${TRACE_INTRA_WAVE_INTERVAL_SECONDS}' --ttft-slo-override-seconds '${TRACE_TTFT_SLO_OVERRIDE_SECONDS}' --max-tokens '${TRACE_MAX_TOKENS}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}'; sha256sum '${TRACE_PATH}' > '${RUN_DIR}/trace/source.sha256'; sha256sum '${EFFECTIVE_TRACE}' > '${RUN_DIR}/trace/effective.sha256'"
 }
 
 start_shared_stack() {
@@ -231,11 +244,11 @@ save_initial_status() {
 }
 
 start_measurement() {
-  remote "${HOSTS[0]}" "! docker inspect '${MEASURE_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${MEASURE_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -e PD_FLIP_ROUTER_ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000 --node name=node1,worker_url=http://192.168.0.40:30000 --node name=node2,worker_url=http://192.168.0.39:30000 --node name=node3,worker_url=http://192.168.0.41:30000 --api-key-env ADMIN_API_KEY --router-api-key-env PD_FLIP_ROUTER_ADMIN_API_KEY --interval-seconds 0.05 --duration-seconds 900 --output-events '${RUN_DIR}/metrics/events.jsonl'\""
+  remote "${HOSTS[0]}" "! docker inspect '${MEASURE_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${MEASURE_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -e PD_FLIP_ROUTER_ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000 --node name=node1,worker_url=http://192.168.0.40:30000 --node name=node2,worker_url=http://192.168.0.39:30000 --node name=node3,worker_url=http://192.168.0.41:30000 --api-key-env ADMIN_API_KEY --router-api-key-env PD_FLIP_ROUTER_ADMIN_API_KEY --interval-seconds 0.05 --duration-seconds '${MEASUREMENT_DURATION_SECONDS}' --output-events '${RUN_DIR}/metrics/events.jsonl'\""
 }
 
 start_workload() {
-  remote "${HOSTS[0]}" "! docker inspect '${WORKLOAD_CONTAINER}' >/dev/null 2>&1; docker run -d --name '${WORKLOAD_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_trace_replay.py replay --trace-jsonl '${EFFECTIVE_TRACE}' --router-url http://127.0.0.1:8000 --mode state_machine --output-dir '${RUN_DIR}/workload' --ledger-path '${LEDGER}' --timeout-seconds 900 --max-workers 40\""
+  remote "${HOSTS[0]}" "! docker inspect '${WORKLOAD_CONTAINER}' >/dev/null 2>&1; docker run -d --name '${WORKLOAD_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_trace_replay.py replay --trace-jsonl '${EFFECTIVE_TRACE}' --router-url http://127.0.0.1:8000 --mode state_machine --output-dir '${RUN_DIR}/workload' --ledger-path '${LEDGER}' --timeout-seconds '${WORKLOAD_TIMEOUT_SECONDS}' --max-workers 40\""
   remote "${HOSTS[0]}" "deadline=\$((SECONDS+180)); until test -s '${LEDGER}'; do (( SECONDS < deadline )) || exit 1; sleep 0.1; done"
 }
 
@@ -256,7 +269,7 @@ collect() {
 }
 
 validate_artifacts() {
-  remote "${HOSTS[0]}" "python3 -c \"import json; ledger=[json.loads(line) for line in open('${LEDGER}', encoding='utf-8') if line.strip()]; final=[row for row in ledger if row.get('status') != 'running']; metrics=[json.loads(line) for line in open('${RUN_DIR}/workload/state_machine/request_metrics.jsonl', encoding='utf-8') if line.strip()]; assert len(final) == 40, len(final); assert len({row['request_id'] for row in final}) == 40; assert len(metrics) == 40, len(metrics); json.dump({'ledger_records': len(ledger), 'final_ledger_records': len(final), 'request_metric_records': len(metrics), 'valid': True}, open('${RUN_DIR}/report/raw_validation.json', 'w', encoding='utf-8'), indent=2, sort_keys=True)\""
+  remote "${HOSTS[0]}" "python3 -c \"import json; ledger=[json.loads(line) for line in open('${LEDGER}', encoding='utf-8') if line.strip()]; final=[row for row in ledger if row.get('status') != 'running']; metrics=[json.loads(line) for line in open('${RUN_DIR}/workload/state_machine/request_metrics.jsonl', encoding='utf-8') if line.strip()]; assert len(final) == 40, len(final); assert len({row['request_id'] for row in final}) == 40; assert len(metrics) == 40, len(metrics); assert all(row.get('completion_token_match') is True for row in metrics); assert all(row.get('completion_tokens_source') == 'usage' for row in metrics); assert all(row.get('forced_text_mismatch_count') == 0 for row in metrics); assert all(row.get('finish_reason_match') is True for row in metrics); json.dump({'ledger_records': len(ledger), 'final_ledger_records': len(final), 'request_metric_records': len(metrics), 'valid': True}, open('${RUN_DIR}/report/raw_validation.json', 'w', encoding='utf-8'), indent=2, sort_keys=True)\""
 }
 
 archive() {

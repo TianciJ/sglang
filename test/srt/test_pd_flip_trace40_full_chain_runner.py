@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 RUNNER = (
     Path(__file__).resolve().parents[2]
     / "experiments"
@@ -39,13 +38,15 @@ def _run_dry_preflight(env_file):
             "preflight",
         ]
     )
-    return subprocess.run(
-        ["bash", "-lc", command], text=True, capture_output=True
-    )
+    return subprocess.run(["bash", "-lc", command], text=True, capture_output=True)
 
 
 class Trace40FullChainRunnerTest(unittest.TestCase):
     def test_prepare_trace_creates_four_valid_interleaved_waves(self):
+        from scripts.playground.disaggregation.pd_flip_prepare_trace import (
+            prepare_trace,
+        )
+
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.jsonl"
             output = Path(directory) / "scheduled.jsonl"
@@ -57,6 +58,14 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
                     "prompt_chars": 10000 if index % 2 == 0 else 1000,
                     "ttft_slo_s": 2.0,
                     "tpot_slo_s": 0.1,
+                    "body": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": f"unique prompt {index}",
+                            }
+                        ]
+                    },
                 }
                 for index in range(40)
             ]
@@ -65,40 +74,45 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                [
-                    "python3",
-                    str(PREPARE_TRACE),
-                    "--source",
-                    str(source),
-                    "--output",
-                    str(output),
-                    "--manifest",
-                    str(manifest),
-                    "--wave-size",
-                    "10",
-                    "--wave-gap-seconds",
-                    "6",
-                    "--intra-wave-interval-seconds",
-                    "0.15",
-                    "--ttft-slo-override-seconds",
-                    "0.2",
-                ],
-                text=True,
-                capture_output=True,
+            prepare_trace(
+                source=source,
+                output=output,
+                manifest=manifest,
+                wave_size=10,
+                wave_gap_seconds=6,
+                intra_wave_interval_seconds=0.15,
+                ttft_slo_override_seconds=0.2,
+                max_tokens=10000,
+                forced_text="字",
+                forced_token_id=2024,
+                custom_logit_processor="serialized-processor",
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
             scheduled = [json.loads(line) for line in output.read_text().splitlines()]
             self.assertEqual(len(scheduled), 40)
-            self.assertEqual([row["request_id"] for row in scheduled], [row["request_id"] for row in rows])
+            self.assertEqual(
+                [row["request_id"] for row in scheduled],
+                [row["request_id"] for row in rows],
+            )
             self.assertEqual(scheduled[0]["arrival_offset_s"], 0.0)
             self.assertEqual(scheduled[10]["arrival_offset_s"], 6.0)
             self.assertEqual(scheduled[20]["arrival_offset_s"], 12.0)
             self.assertEqual(scheduled[30]["arrival_offset_s"], 18.0)
             self.assertAlmostEqual(scheduled[-1]["arrival_offset_s"], 19.35)
             self.assertTrue(all(row["ttft_slo_s"] == 0.2 for row in scheduled))
-            self.assertEqual(json.loads(manifest.read_text())["request_count"], 40)
+            self.assertTrue(
+                all(row["body"]["max_tokens"] == 10000 for row in scheduled)
+            )
+            self.assertTrue(
+                all(
+                    row["body"]["custom_params"]["forced_token_id"] == 2024
+                    for row in scheduled
+                )
+            )
+            schedule = json.loads(manifest.read_text())
+            self.assertEqual(schedule["request_count"], 40)
+            self.assertEqual(schedule["max_tokens"], 10000)
+            self.assertEqual(schedule["forced_token_id"], 2024)
 
     def test_env_example_points_at_current_cluster_layout(self):
         source = ENV_EXAMPLE.read_text(encoding="utf-8")
@@ -111,6 +125,9 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
         self.assertIn("PD_FLIP_OBSERVATION_SECONDS=10", source)
         self.assertIn("TRACE_WAVE_SIZE=10", source)
         self.assertIn("TRACE_WAVE_GAP_SECONDS=6", source)
+        self.assertIn("TRACE_MAX_TOKENS=10000", source)
+        self.assertIn("TRACE_FORCED_TEXT=字", source)
+        self.assertIn("MODEL_PATH=/models/deepseek_v3.1_terminus", source)
 
     def test_runner_declares_full_timeline_contract(self):
         source = RUNNER.read_text(encoding="utf-8")
@@ -153,12 +170,8 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
     def test_prefill_donor_mode_is_required_by_worker_preflight_and_controller(self):
         source = RUNNER.read_text(encoding="utf-8")
 
-        self.assertIn(
-            "assert '--enable-pd-flip-prefill-donor' in decoded", source
-        )
-        self.assertIn(
-            "pd_flip_controller.py --prefill-donor-mode --router-url", source
-        )
+        self.assertIn("assert '--enable-pd-flip-prefill-donor' in decoded", source)
+        self.assertIn("pd_flip_controller.py --prefill-donor-mode --router-url", source)
 
     def test_router_is_restarted_after_workers_are_healthy(self):
         source = RUNNER.read_text(encoding="utf-8")
@@ -176,17 +189,13 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
     def test_controller_source_and_target_have_defaults_and_env_overrides(self):
         source = RUNNER.read_text(encoding="utf-8")
 
-        self.assertIn(
-            'SOURCE_NAME="${PD_FLIP_SOURCE_NAME:-node2}"', source
-        )
+        self.assertIn('SOURCE_NAME="${PD_FLIP_SOURCE_NAME:-node2}"', source)
         self.assertIn(
             'MIGRATION_TARGET_NAME="${PD_FLIP_MIGRATION_TARGET_NAME:-node3}"',
             source,
         )
-        self.assertIn('--source-name \'${SOURCE_NAME}\'', source)
-        self.assertIn(
-            '--migration-target-name \'${MIGRATION_TARGET_NAME}\'', source
-        )
+        self.assertIn("--source-name '${SOURCE_NAME}'", source)
+        self.assertIn("--migration-target-name '${MIGRATION_TARGET_NAME}'", source)
 
     def test_preflight_rejects_same_source_and_migration_target(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -239,9 +248,7 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
                     )
                     result = _run_dry_preflight(env_file)
 
-                self.assertEqual(
-                    result.returncode, 2, result.stdout + result.stderr
-                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn(expected, result.stderr)
                 self.assertNotIn("[dry-run] ssh", result.stdout)
 

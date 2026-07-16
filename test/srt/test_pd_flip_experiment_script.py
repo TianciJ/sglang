@@ -3,7 +3,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / "scripts"
@@ -17,6 +16,11 @@ DOCKER_DIR = (
     / "playground"
     / "disaggregation"
     / "pd_flip_docker"
+)
+FULL_CHAIN_SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "experiments"
+    / "pd_flip_trace40_full_chain.sh"
 )
 
 
@@ -109,6 +113,20 @@ class TestPDFlipExperimentScript(unittest.TestCase):
     def setUp(self):
         self.script = load_script_module()
 
+    def test_deepseek_trace_contract_is_parameterized(self):
+        script = FULL_CHAIN_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"', script)
+        self.assertIn('TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-字}"', script)
+        self.assertIn(
+            'MODEL_PATH="${MODEL_PATH:-/models/deepseek_v3.1_terminus}"', script
+        )
+        self.assertIn("--max-tokens '${TRACE_MAX_TOKENS}'", script)
+        self.assertIn("--forced-text '${TRACE_FORCED_TEXT}'", script)
+        self.assertIn("--tokenizer-path '${MODEL_PATH}'", script)
+        self.assertNotIn("--timeout-seconds 900", script)
+        self.assertNotIn("--duration-seconds 900", script)
+
     def test_extracts_pd_flip_from_internal_state(self):
         server_info = {
             "internal_states": [
@@ -189,12 +207,16 @@ class TestPDFlipExperimentScript(unittest.TestCase):
         server_infos = [
             self._server_info("preparing", idle=True),
             self._server_info("flipping", idle=True),
-            self._server_info("safe", idle=True, direction="none", current_role="prefill"),
+            self._server_info(
+                "safe", idle=True, direction="none", current_role="prefill"
+            ),
         ]
         client = FakeClient(server_infos)
         commands = []
         old_runner = self.script.run_restart_command
-        self.script.run_restart_command = lambda command, log_fn: commands.append(command)
+        self.script.run_restart_command = lambda command, log_fn: commands.append(
+            command
+        )
         try:
             result = self.script.run_once(
                 client=client,
