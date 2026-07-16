@@ -117,6 +117,8 @@ class FakeReq:
 
 def target_scheduler(phases, *, fail_init_rid=None):
     scheduler = Scheduler.__new__(Scheduler)
+    scheduler.ps = types.SimpleNamespace(attn_dp_rank=0, dp_rank=0)
+    scheduler.server_args = types.SimpleNamespace(dp_size=1)
     scheduler.tree_cache = object()
     scheduler.waiting_queue = []
     scheduler.enable_decode_hicache = False
@@ -142,18 +144,30 @@ def target_scheduler(phases, *, fail_init_rid=None):
     entries = {}
     for rid, phase in phases.items():
         req = FakeReq(rid, fail_init=rid == fail_init_rid)
+        manifest = {
+            "rid": rid,
+            "origin_input_ids": [],
+            "prompt_len": 0,
+            "kv_committed_len": 0,
+            "target_decode_dp_rank": 0,
+        }
         entries[rid] = {
             "phase": phase,
             "held": phase == "transferred_held",
             "decode_req": types.SimpleNamespace(req=req, kv_receiver=None),
+            "manifest": manifest,
+            "base_manifest": dict(manifest),
+            "base_committed_len": 0,
+            "target_committed_len": 0,
             "timing_debug": {},
         }
     scheduler.pd_flip_migration_session = {
         "session_id": "s",
         "role": "target",
+        "dp_rank": 0,
         "state": "target_transferred_held",
         "target_entries": entries,
-        "manifests": [{"rid": rid} for rid in entries],
+        "manifests": [entry["manifest"] for entry in entries.values()],
         "held_reqs": len(entries),
         "timing_debug": {},
     }
@@ -161,6 +175,89 @@ def target_scheduler(phases, *, fail_init_rid=None):
 
 
 class TestAtomicTargetHandoff(unittest.TestCase):
+    def test_commit_preflight_validates_boundaries_rank_and_layout(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.ps = types.SimpleNamespace(attn_dp_rank=3, dp_rank=0)
+        scheduler.server_args = types.SimpleNamespace(dp_size=8)
+        manifest = {
+            "rid": "r0",
+            "prefill_donor_end": 64,
+            "source_decode_start": 64,
+            "prompt_len": 96,
+            "kv_committed_len": 112,
+            "target_decode_dp_rank": 3,
+            "model_fingerprint": "layout-a",
+        }
+        entry = {
+            "phase": "transferred_held",
+            "base_manifest": dict(manifest),
+            "manifest": {
+                **manifest,
+                "delta_from_len": 112,
+                "kv_committed_len": 120,
+                "model_fingerprint": "layout-a",
+            },
+            "base_committed_len": 112,
+            "target_committed_len": 120,
+            "prefill_received_start": 0,
+            "prefill_received_end": 64,
+            "source_transfer_start": 64,
+            "source_transfer_end": 112,
+            "delta": {"from_len": 112, "to_len": 120, "phase": "transferred"},
+        }
+        session = {"dp_rank": 3, "role": "target"}
+
+        self.assertTrue(
+            Scheduler._pd_flip_validate_commit_entry(scheduler, entry, session)
+        )
+
+        for field, value, message in (
+            ("prefill_received_end", 97, "ownership"),
+            ("target_committed_len", 111, "boundary"),
+        ):
+            broken = copy.deepcopy(entry)
+            broken[field] = value
+            with self.assertRaisesRegex(RuntimeError, message):
+                Scheduler._pd_flip_validate_commit_entry(scheduler, broken, session)
+
+        broken = copy.deepcopy(entry)
+        broken["manifest"]["model_fingerprint"] = "layout-b"
+        with self.assertRaisesRegex(RuntimeError, "fingerprint"):
+            Scheduler._pd_flip_validate_commit_entry(scheduler, broken, session)
+
+        broken = copy.deepcopy(entry)
+        broken["manifest"]["target_decode_dp_rank"] = 4
+        with self.assertRaisesRegex(RuntimeError, "target DP rank"):
+            Scheduler._pd_flip_validate_commit_entry(scheduler, broken, session)
+
+    def test_delta_application_advances_target_commit_boundary(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler._pd_flip_note_timing = lambda *_args: None
+        req = types.SimpleNamespace(
+            origin_input_ids=[1, 2, 3],
+            output_ids=[],
+            kv_allocated_len=5,
+        )
+        entry = {
+            "decode_req": types.SimpleNamespace(req=req),
+            "manifest": {"kv_committed_len": 5},
+            "committed_len": 5,
+            "target_committed_len": 5,
+        }
+
+        Scheduler._pd_flip_apply_delta_manifest_to_target(
+            scheduler,
+            entry,
+            {
+                "output_ids": [4, 5, 6],
+                "kv_committed_len": 7,
+                "last_emitted_output_seq": 3,
+                "pd_flip_session_id": "s",
+            },
+        )
+
+        self.assertEqual(entry["target_committed_len"], 7)
+
     def test_target_commit_validates_each_held_request_after_restore(self):
         scheduler = target_scheduler(
             {"r0": "transferred_held", "r1": "transferred_held"}

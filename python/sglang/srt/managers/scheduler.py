@@ -2161,6 +2161,7 @@ class Scheduler(
         session = {
             "session_id": session_id,
             "role": "source",
+            "dp_rank": local_dp_rank,
             "state": "source_started" if not real_error else "source_failed",
             "target_url": recv_req.target_url,
             "manifests": manifests,
@@ -2286,6 +2287,7 @@ class Scheduler(
         self.pd_flip_migration_session = {
             "session_id": session_id,
             "role": "target",
+            "dp_rank": partition["dp_rank"],
             "state": "target_prepared" if not real_error else "target_failed",
             "source_url": recv_req.source_url,
             "manifests": manifests,
@@ -2365,6 +2367,38 @@ class Scheduler(
                 return None
             return max(0.0, completed - started)
 
+        def ranked_measurement(rid: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+            measure = getattr(self, "_pd_flip_migration_request_measurements", None)
+            if not callable(measure):
+                return {}
+            rows = measure(
+                {
+                    "session_id": session.get("session_id"),
+                    "role": "prefill_donor",
+                    "dp_rank": session.get("dp_rank", self._pd_flip_attn_dp_rank()),
+                    "source_entries": {rid: entry},
+                    "timing_debug": {},
+                }
+            )
+            if not rows:
+                return {}
+            row = rows[0]
+            return {
+                key: row.get(key)
+                for key in (
+                    "request_id",
+                    "session_id",
+                    "worker",
+                    "dp_rank",
+                    "source_decode_dp_rank",
+                    "prefill_donor_dp_rank",
+                    "target_decode_dp_rank",
+                    "model_fingerprint",
+                    "page_size",
+                    "phase_events",
+                )
+            }
+
         return {
             "session_id": session.get("session_id"),
             "role": "prefill_donor",
@@ -2395,6 +2429,7 @@ class Scheduler(
                         )
                         if entry.get(key) is not None
                     },
+                    **ranked_measurement(rid, entry),
                     prompt_len=(entry.get("manifest") or {}).get("prompt_len"),
                     source_decode_start=(entry.get("manifest") or {}).get(
                         "source_decode_start"
@@ -2522,6 +2557,8 @@ class Scheduler(
 
         self.pd_flip_prefill_donor_session = {
             "session_id": session_id,
+            "role": "prefill_donor",
+            "dp_rank": partition["dp_rank"],
             "state": "prefill_donor_started",
             "manifests": manifests,
             "entries": entries,
@@ -2824,6 +2861,11 @@ class Scheduler(
         try:
             for rid in requested_rids:
                 entry = entries[rid]
+                validate_commit = getattr(
+                    self, "_pd_flip_validate_commit_entry", None
+                )
+                if callable(validate_commit):
+                    validate_commit(entry, session)
                 if not entry.get("drop_on_commit"):
                     self._pd_flip_target_commit_hicache_restore(entry["decode_req"])
                     self._pd_flip_target_committed_mapping_ready(entry)
@@ -3870,11 +3912,7 @@ class Scheduler(
             return
         manifest = entry.get("manifest") or {}
         if "base_manifest" not in entry:
-            entry["base_manifest"] = {
-                "origin_input_ids": list(manifest.get("origin_input_ids") or []),
-                "kv_committed_len": manifest.get("kv_committed_len"),
-                "pd_flip_source_queue": manifest.get("pd_flip_source_queue"),
-            }
+            entry["base_manifest"] = dict(manifest)
         if "base_committed_len" not in entry:
             committed_len = manifest.get("kv_committed_len")
             if committed_len is None:
@@ -5056,6 +5094,7 @@ class Scheduler(
             manifest.get("last_emitted_output_seq", 0) or 0
         )
         entry["committed_len"] = committed_len
+        entry["target_committed_len"] = committed_len
         entry["manifest"] = manifest
         self._pd_flip_note_timing(entry, "target_delta_state_applied")
 
@@ -5843,6 +5882,102 @@ class Scheduler(
             )
         return True
 
+    def _pd_flip_validate_commit_entry(
+        self, entry: Dict[str, Any], session: Dict[str, Any]
+    ) -> bool:
+        """Validate ownership, layout, and final C1 before publishing mappings."""
+
+        base_manifest = entry.get("base_manifest") or entry.get("manifest") or {}
+        manifest = entry.get("manifest") or base_manifest
+        try:
+            donor_end = int(base_manifest.get("prefill_donor_end") or 0)
+            prompt_len = int(
+                base_manifest.get("prompt_len")
+                or len(base_manifest.get("origin_input_ids") or [])
+            )
+            c0 = int(
+                entry.get("base_committed_len")
+                if entry.get("base_committed_len") is not None
+                else base_manifest["kv_committed_len"]
+            )
+            c1 = int(entry["target_committed_len"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "migration target commit boundary metadata is missing or invalid"
+            ) from exc
+        if not 0 <= donor_end <= prompt_len <= c0 <= c1:
+            raise RuntimeError(
+                "migration target commit boundary is invalid: "
+                f"B={donor_end}, P={prompt_len}, C0={c0}, C1={c1}"
+            )
+        if entry.get("phase") != "transferred_held":
+            raise RuntimeError(
+                "migration target commit receiver is not transferred and held"
+            )
+
+        local_rank_value = session.get("dp_rank")
+        if local_rank_value is None:
+            local_rank_value = self._pd_flip_attn_dp_rank()
+        local_rank = int(local_rank_value or 0)
+        declared_rank = manifest.get(
+            "target_decode_dp_rank", base_manifest.get("target_decode_dp_rank")
+        )
+        dp_size = int(
+            getattr(getattr(self, "server_args", None), "dp_size", 1) or 1
+        )
+        if declared_rank is None and dp_size > 1:
+            raise RuntimeError("migration target DP rank is missing at commit")
+        if declared_rank is not None and int(declared_rank) != local_rank:
+            raise RuntimeError(
+                "migration target DP rank mismatch at commit: "
+                f"declared={declared_rank}, local={local_rank}"
+            )
+
+        base_fingerprint = base_manifest.get("model_fingerprint")
+        final_fingerprint = manifest.get("model_fingerprint")
+        if dp_size > 1 and (not base_fingerprint or not final_fingerprint):
+            raise RuntimeError("migration target layout fingerprint is missing")
+        if (
+            base_fingerprint is not None
+            and final_fingerprint is not None
+            and base_fingerprint != final_fingerprint
+        ):
+            raise RuntimeError(
+                "migration target layout fingerprint changed between base and delta"
+            )
+
+        if base_manifest.get("prefill_donor_host") or donor_end > 0:
+            coverage = (
+                int(entry.get("prefill_received_start", -1)),
+                int(entry.get("prefill_received_end", -1)),
+                int(entry.get("source_transfer_start", -1)),
+                int(entry.get("source_transfer_end", -1)),
+            )
+            if coverage != (0, donor_end, donor_end, c0):
+                raise RuntimeError(
+                    "migration target donor/source logical ownership mismatch: "
+                    f"observed={coverage}, expected={(0, donor_end, donor_end, c0)}"
+                )
+
+        delta = entry.get("delta") or {}
+        if c1 > c0:
+            try:
+                delta_coverage = (
+                    int(delta["from_len"]),
+                    int(delta["to_len"]),
+                    str(delta["phase"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "migration target delta ownership is missing or invalid"
+                ) from exc
+            if delta_coverage != (c0, c1, "transferred"):
+                raise RuntimeError(
+                    "migration target delta logical ownership mismatch: "
+                    f"observed={delta_coverage}, expected={(c0, c1, 'transferred')}"
+                )
+        return True
+
     def _pd_flip_target_stitch_ready(self, entry: Dict[str, Any]) -> bool:
         if not getattr(
             getattr(self, "server_args", None),
@@ -6604,6 +6739,9 @@ class Scheduler(
 
         entries = session.get("source_entries") or session.get("target_entries") or {}
         session_timing = session.get("timing_debug") or {}
+        session_id = session.get("session_id")
+        worker_role = session.get("role", "unknown")
+        dp_rank = int(session.get("dp_rank", 0) or 0)
         rows = []
         for rid, entry in entries.items():
             manifest = entry.get("manifest") or {}
@@ -6615,15 +6753,106 @@ class Scheduler(
             c1 = entry.get("committed_len")
             if c1 is None:
                 c1 = entry.get("target_committed_len", c0)
+            c0_value = int(c0 or 0)
+            c1_value = int(c1 or 0)
+            donor_end = int(base_manifest.get("prefill_donor_end") or 0)
+            source_start = int(
+                base_manifest.get("source_decode_start") or donor_end or 0
+            )
+            page_size = max(1, int(base_manifest.get("page_size") or 1))
+
+            phase_events = []
+            for key, mono_value in sorted(timing.items()):
+                if not key.endswith("_mono") or not isinstance(
+                    mono_value, (int, float)
+                ):
+                    continue
+                phase = key[: -len("_mono")]
+                if "delta" in phase:
+                    logical_start, logical_end = c0_value, c1_value
+                    transfer_bytes = entry.get("delta_transfer_bytes")
+                elif "prefill_donor" in phase:
+                    logical_start, logical_end = 0, donor_end
+                    transfer_bytes = entry.get("prefill_donor_transfer_bytes")
+                elif "hicache" in phase or "mooncake" in phase:
+                    logical_start, logical_end = 0, source_start
+                    transfer_bytes = entry.get("mooncake_bytes")
+                elif "source" in phase:
+                    logical_start, logical_end = source_start, c0_value
+                    transfer_bytes = entry.get("source_transfer_bytes")
+                else:
+                    logical_start, logical_end = 0, c1_value
+                    transfer_bytes = 0
+                epoch_value = timing.get(f"{phase}_epoch")
+                phase_events.append(
+                    {
+                        "request_id": str(rid),
+                        "session_id": session_id,
+                        "worker": worker_role,
+                        "dp_rank": dp_rank,
+                        "phase": phase,
+                        "epoch_ns": (
+                            int(round(float(epoch_value) * 1_000_000_000))
+                            if isinstance(epoch_value, (int, float))
+                            else None
+                        ),
+                        "mono_ns": int(
+                            round(float(mono_value) * 1_000_000_000)
+                        ),
+                        "source_decode_dp_rank": base_manifest.get(
+                            "source_decode_dp_rank"
+                        ),
+                        "prefill_donor_dp_rank": base_manifest.get(
+                            "prefill_donor_dp_rank"
+                        ),
+                        "target_decode_dp_rank": base_manifest.get(
+                            "target_decode_dp_rank"
+                        ),
+                        "logical_start": logical_start,
+                        "logical_end": logical_end,
+                        "actual_slot_count": max(
+                            0, logical_end - logical_start
+                        ),
+                        "page_size": page_size,
+                        "page_count": (
+                            max(0, logical_end - logical_start) + page_size - 1
+                        )
+                        // page_size,
+                        "bytes": (
+                            int(transfer_bytes)
+                            if transfer_bytes is not None
+                            else None
+                        ),
+                        "model_fingerprint": base_manifest.get(
+                            "model_fingerprint"
+                        ),
+                    }
+                )
             rows.append(
                 {
                     "rid": str(rid),
+                    "request_id": str(rid),
+                    "session_id": session_id,
+                    "worker": worker_role,
+                    "dp_rank": dp_rank,
+                    "source_decode_dp_rank": base_manifest.get(
+                        "source_decode_dp_rank"
+                    ),
+                    "prefill_donor_dp_rank": base_manifest.get(
+                        "prefill_donor_dp_rank"
+                    ),
+                    "target_decode_dp_rank": base_manifest.get(
+                        "target_decode_dp_rank"
+                    ),
+                    "model_fingerprint": base_manifest.get("model_fingerprint"),
+                    "page_size": page_size,
+                    "phase_events": phase_events,
                     "p_tokens": len(base_manifest.get("origin_input_ids") or []),
                     "h_tokens": entry.get("original_mooncake_hit_len")
                     if entry.get("original_mooncake_hit_len") is not None
                     else entry.get("mooncake_hit_len"),
-                    "c0_tokens": int(c0 or 0),
-                    "c1_tokens": int(c1 or 0),
+                    "c0_tokens": c0_value,
+                    "c1_tokens": c1_value,
                     "prompt_len": base_manifest.get("prompt_len")
                     or len(base_manifest.get("origin_input_ids") or []),
                     "prefill_donor_end": base_manifest.get("prefill_donor_end"),

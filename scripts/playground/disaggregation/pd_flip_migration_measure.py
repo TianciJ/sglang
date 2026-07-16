@@ -142,43 +142,53 @@ def collect_worker_events(client: HttpClient, node: JsonDict) -> List[JsonDict]:
         server_event["error"] = repr(exc)
     events.append(server_event)
 
-    migration_event = now_fields()
-    migration_event.update(
-        {
-            "event_type": "migration_status",
-            "component": "worker",
-            "node": name,
-            "url": base,
-        }
-    )
+    migration_base = {
+        "event_type": "migration_status",
+        "component": "worker",
+        "node": name,
+        "url": base,
+    }
     try:
         migration_payload = client.get_json(base + "/pd_flip/migration/status")
-        migration_event["ok"] = True
-        migration_event["status"] = unwrap_migration_status(migration_payload)
+        statuses = unwrap_migration_statuses(migration_payload)
+        for status in statuses or [{}]:
+            migration_event = now_fields()
+            migration_event.update(migration_base)
+            migration_event["ok"] = True
+            migration_event["dp_rank"] = status.get("dp_rank")
+            migration_event["status"] = status
+            events.append(migration_event)
     except Exception as exc:
+        migration_event = now_fields()
+        migration_event.update(migration_base)
         migration_event["ok"] = False
         migration_event["error"] = repr(exc)
-    events.append(migration_event)
+        events.append(migration_event)
 
-    donor_event = now_fields()
-    donor_event.update(
-        {
-            "event_type": "prefill_donor_status",
-            "component": "worker",
-            "node": name,
-            "url": base,
-        }
-    )
+    donor_base = {
+        "event_type": "prefill_donor_status",
+        "component": "worker",
+        "node": name,
+        "url": base,
+    }
     try:
         donor_payload = client.get_json(
             base + "/pd_flip/migration/prefill-donor/status"
         )
-        donor_event["ok"] = True
-        donor_event["status"] = unwrap_migration_status(donor_payload)
+        statuses = unwrap_migration_statuses(donor_payload)
+        for status in statuses or [{}]:
+            donor_event = now_fields()
+            donor_event.update(donor_base)
+            donor_event["ok"] = True
+            donor_event["dp_rank"] = status.get("dp_rank")
+            donor_event["status"] = status
+            events.append(donor_event)
     except Exception as exc:
+        donor_event = now_fields()
+        donor_event.update(donor_base)
         donor_event["ok"] = False
         donor_event["error"] = repr(exc)
-    events.append(donor_event)
+        events.append(donor_event)
 
     load_event = now_fields()
     load_event.update(
@@ -204,17 +214,26 @@ def extract_pd_flip(server_info: Any) -> JsonDict:
     return {}
 
 
-def unwrap_migration_status(payload: Any) -> JsonDict:
+def unwrap_migration_statuses(payload: Any) -> List[JsonDict]:
     candidates = payload if isinstance(payload, list) else [payload]
+    statuses = []
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         status = candidate.get("status")
         if isinstance(status, dict):
-            return compact_dict(status)
-        if "state" in candidate and "pending_reqs" in candidate:
-            return compact_dict(candidate)
-    return {}
+            row = compact_dict(status)
+            if row.get("dp_rank") is None and candidate.get("dp_rank") is not None:
+                row["dp_rank"] = candidate.get("dp_rank")
+            statuses.append(row)
+        elif "state" in candidate:
+            statuses.append(compact_dict(candidate))
+    return statuses
+
+
+def unwrap_migration_status(payload: Any) -> JsonDict:
+    statuses = unwrap_migration_statuses(payload)
+    return statuses[0] if statuses else {}
 
 
 def compact_dict(data: JsonDict) -> JsonDict:
@@ -337,6 +356,7 @@ def build_timeline(events: Sequence[JsonDict]) -> List[JsonDict]:
             session_id = status.get("session_id")
             details = {
                 "session_id": session_id,
+                "dp_rank": status.get("dp_rank", event.get("dp_rank")),
                 "migration_role": role,
                 "migration_state": state,
                 "pending_reqs": status.get("pending_reqs"),
@@ -608,6 +628,7 @@ def flatten_migration_samples(events: Sequence[JsonDict]) -> List[JsonDict]:
             "ts_wall": event.get("ts_wall"),
             "ts_mono": event.get("ts_mono"),
             "node": event.get("node"),
+            "dp_rank": status.get("dp_rank", event.get("dp_rank")),
             "ok": event.get("ok"),
             "error": event.get("error"),
             "enabled": status.get("enabled"),
@@ -690,6 +711,65 @@ def flatten_migration_request_samples(events: Sequence[JsonDict]) -> List[JsonDi
                     row[field] = measurement.get(field)
                 rows.append(row)
     return rows
+
+
+def flatten_migration_phase_events(events: Sequence[JsonDict]) -> List[JsonDict]:
+    """Explode exact per-request process timestamps and deduplicate poll repeats."""
+
+    rows = []
+    seen = set()
+    for event in events:
+        if event.get("event_type") not in {
+            "migration_status",
+            "prefill_donor_status",
+        }:
+            continue
+        status = event.get("status") or {}
+        measurements = list(status.get("request_measurements") or [])
+        if event.get("event_type") == "prefill_donor_status":
+            measurements.extend(
+                measurement
+                for measurement in (status.get("entries") or {}).values()
+                if isinstance(measurement, dict)
+            )
+        for measurement in measurements:
+            if not isinstance(measurement, dict):
+                continue
+            for phase_event in measurement.get("phase_events") or []:
+                if not isinstance(phase_event, dict):
+                    continue
+                row = dict(phase_event)
+                row["request_id"] = str(
+                    row.get("request_id") or measurement.get("rid") or ""
+                )
+                row["session_id"] = (
+                    row.get("session_id") or status.get("session_id")
+                )
+                row["worker_role"] = row.get("worker") or status.get("role")
+                row["worker"] = event.get("node") or row.get("worker")
+                row["sample_ts_wall"] = event.get("ts_wall")
+                row["sample_ts_mono"] = event.get("ts_mono")
+                identity = (
+                    row.get("request_id"),
+                    row.get("session_id"),
+                    row.get("worker"),
+                    row.get("dp_rank"),
+                    row.get("phase"),
+                    row.get("mono_ns"),
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                rows.append(row)
+    return sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("mono_ns") or 0),
+            str(row.get("worker") or ""),
+            int(row.get("dp_rank") or 0),
+            str(row.get("request_id") or ""),
+        ),
+    )
 
 
 def summarize_fallback(
@@ -914,6 +994,7 @@ def write_outputs(
     durations = build_stage_durations(timeline)
     migration_samples = flatten_migration_samples(events)
     migration_request_samples = flatten_migration_request_samples(events)
+    migration_phase_events = flatten_migration_phase_events(events)
     router_samples = flatten_router_samples(events)
     pd_flip_samples = flatten_pd_flip_samples(events)
     worker_load_samples = flatten_worker_load_samples(events)
@@ -939,6 +1020,12 @@ def write_outputs(
         migration_request_samples,
         migration_request_fields(),
     )
+    write_jsonl(output_dir / "migration_phase_events.jsonl", migration_phase_events)
+    write_csv(
+        output_dir / "migration_phase_events.csv",
+        migration_phase_events,
+        migration_phase_event_fields(),
+    )
     write_csv(output_dir / "router_worker_samples.csv", router_samples, router_fields())
     write_csv(output_dir / "worker_pd_flip_samples.csv", pd_flip_samples, pd_flip_fields())
     write_csv(output_dir / "worker_load_samples.csv", worker_load_samples, worker_load_fields())
@@ -954,6 +1041,7 @@ def write_outputs(
         "timeline_stages": [row.get("stage") for row in timeline],
         "worker_load_sample_count": len(worker_load_samples),
         "migration_request_sample_count": len(migration_request_samples),
+        "migration_phase_event_count": len(migration_phase_events),
         "migration_outcome": migration_outcome(timeline),
         "controller_message": controller.get("message"),
         "controller_success": controller.get("success"),
@@ -1015,6 +1103,7 @@ def timeline_fields() -> List[str]:
         "ts_wall",
         "ts_mono",
         "node",
+        "dp_rank",
         "session_id",
         "worker_url",
         "active_load",
@@ -1041,6 +1130,7 @@ def migration_status_fields() -> List[str]:
         "ts_wall",
         "ts_mono",
         "node",
+        "dp_rank",
         "ok",
         "error",
         "enabled",
@@ -1075,6 +1165,15 @@ def migration_request_fields() -> List[str]:
         "node",
         "session_id",
         "rid",
+        "request_id",
+        "worker",
+        "dp_rank",
+        "source_decode_dp_rank",
+        "prefill_donor_dp_rank",
+        "target_decode_dp_rank",
+        "model_fingerprint",
+        "page_size",
+        "phase_events",
         "p_tokens",
         "h_tokens",
         "c0_tokens",
@@ -1123,6 +1222,31 @@ def migration_request_fields() -> List[str]:
         "final_owner",
         "output_boundary",
         "rollback_reason",
+    ]
+
+
+def migration_phase_event_fields() -> List[str]:
+    return [
+        "request_id",
+        "session_id",
+        "worker",
+        "worker_role",
+        "dp_rank",
+        "phase",
+        "epoch_ns",
+        "mono_ns",
+        "source_decode_dp_rank",
+        "prefill_donor_dp_rank",
+        "target_decode_dp_rank",
+        "logical_start",
+        "logical_end",
+        "actual_slot_count",
+        "page_size",
+        "page_count",
+        "bytes",
+        "model_fingerprint",
+        "sample_ts_wall",
+        "sample_ts_mono",
     ]
 
 

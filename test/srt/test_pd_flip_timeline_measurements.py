@@ -57,6 +57,124 @@ def load_measure_module():
 
 
 class TimelineMeasurementTest(unittest.TestCase):
+    def test_ranked_migration_phase_event_has_reconstructable_identity(self):
+        measure = load_scheduler_method("_pd_flip_migration_request_measurements")
+        session = {
+            "session_id": "s-rank",
+            "role": "target",
+            "dp_rank": 3,
+            "target_entries": {
+                "r0": {
+                    "manifest": {
+                        "rid": "r0",
+                        "origin_input_ids": [1, 2, 3, 4],
+                        "kv_committed_len": 6,
+                        "source_decode_start": 2,
+                        "source_decode_dp_rank": 1,
+                        "target_decode_dp_rank": 3,
+                        "page_size": 2,
+                        "model_fingerprint": "model-layout-sha",
+                    },
+                    "target_committed_len": 8,
+                    "source_index_size": 2,
+                    "source_transfer_bytes": 1024,
+                    "delta_transfer_bytes": 512,
+                    "timing_debug": {
+                        "target_receive_completed_mono": 12.5,
+                        "target_receive_completed_epoch": 1002.5,
+                    },
+                }
+            },
+        }
+
+        row = measure(session)[0]
+        event = row["phase_events"][0]
+
+        for field in (
+            "request_id",
+            "session_id",
+            "worker",
+            "dp_rank",
+            "phase",
+            "epoch_ns",
+            "mono_ns",
+            "logical_start",
+            "logical_end",
+            "actual_slot_count",
+            "bytes",
+            "model_fingerprint",
+        ):
+            self.assertIn(field, event)
+        self.assertEqual(event["request_id"], "r0")
+        self.assertEqual(event["session_id"], "s-rank")
+        self.assertEqual(event["dp_rank"], 3)
+        self.assertEqual(event["target_decode_dp_rank"], 3)
+        self.assertEqual(event["model_fingerprint"], "model-layout-sha")
+
+    def test_phase_event_flattener_uses_external_worker_node(self):
+        module = load_measure_module()
+        events = [
+            {
+                "event_type": "migration_status",
+                "node": "decode-b",
+                "status": {
+                    "session_id": "s0",
+                    "request_measurements": [
+                        {
+                            "rid": "r0",
+                            "phase_events": [
+                                {
+                                    "request_id": "r0",
+                                    "session_id": "s0",
+                                    "worker": "target",
+                                    "dp_rank": 5,
+                                    "phase": "target_receive_completed",
+                                    "epoch_ns": 10,
+                                    "mono_ns": 20,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ]
+
+        rows = module.flatten_migration_phase_events(events)
+
+        self.assertEqual(rows[0]["worker"], "decode-b")
+        self.assertEqual(rows[0]["worker_role"], "target")
+        self.assertEqual(rows[0]["dp_rank"], 5)
+
+    def test_worker_collection_preserves_every_dp_rank_status(self):
+        module = load_measure_module()
+
+        class Client:
+            def get_json(self, url):
+                if url.endswith("/pd_flip/migration/status"):
+                    return [
+                        {"success": True, "status": {"dp_rank": 0, "state": "ready"}},
+                        {"success": True, "status": {"dp_rank": 1, "state": "ready"}},
+                    ]
+                if url.endswith("/pd_flip/migration/prefill-donor/status"):
+                    return [
+                        {"success": True, "status": {"dp_rank": 0, "state": "idle"}},
+                        {"success": True, "status": {"dp_rank": 1, "state": "idle"}},
+                    ]
+                return {}
+
+        events = module.collect_worker_events(
+            Client(), {"name": "decode-b", "worker_url": "http://decode-b"}
+        )
+
+        migration = [
+            event for event in events if event["event_type"] == "migration_status"
+        ]
+        donor = [
+            event for event in events if event["event_type"] == "prefill_donor_status"
+        ]
+        self.assertEqual([event["dp_rank"] for event in migration], [0, 1])
+        self.assertEqual([event["dp_rank"] for event in donor], [0, 1])
+
     def test_fallback_summary_preserves_stitch_and_fallback_phases(self):
         module = load_measure_module()
         row = {
