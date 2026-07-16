@@ -17,6 +17,7 @@ from sglang.srt.sampling.custom_logit_processor import (
     DeepseekOCRNoRepeatNGramLogitProcessor,
     DeepSeekR1ThinkingBudgetLogitProcessor,
     DisallowedTokensLogitsProcessor,
+    ForcedSingleTokenLogitProcessor,
     Qwen3ThinkingBudgetLogitProcessor,
     _cache_from_str,
 )
@@ -85,6 +86,31 @@ class TestDisallowedTokensLogitsProcessor(CustomTestCase):
         params = [{"token_ids": [1, 2]}, {"token_ids": [3, 4]}]
         with self.assertRaises(AssertionError):
             self.processor(logits, params)
+
+
+class TestForcedSingleTokenLogitProcessor(CustomTestCase):
+    def test_forces_each_batch_row_to_its_declared_token(self):
+        logits = torch.arange(20, dtype=torch.float32).reshape(2, 10)
+
+        result = ForcedSingleTokenLogitProcessor()(
+            logits,
+            [{"forced_token_id": 3}, {"forced_token_id": 7}],
+        )
+
+        self.assertEqual(result[0, 3].item(), 0.0)
+        self.assertEqual(result[1, 7].item(), 0.0)
+        self.assertTrue(torch.isneginf(result[0, [0, 1, 2, 4, 5, 6, 7, 8, 9]]).all())
+        self.assertTrue(torch.isneginf(result[1, [0, 1, 2, 3, 4, 5, 6, 8, 9]]).all())
+
+    def test_rejects_out_of_range_token_id(self):
+        with self.assertRaisesRegex(ValueError, "forced_token_id"):
+            ForcedSingleTokenLogitProcessor()(
+                torch.zeros(1, 4), [{"forced_token_id": 4}]
+            )
+
+    def test_requires_parameters_for_every_batch_row(self):
+        with self.assertRaisesRegex(ValueError, "batch size"):
+            ForcedSingleTokenLogitProcessor()(torch.zeros(2, 4), None)
 
 
 # ThinkingBudgetLogitProcessor (using Qwen3 variant)

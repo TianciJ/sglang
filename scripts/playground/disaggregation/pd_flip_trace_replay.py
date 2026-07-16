@@ -20,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-
 JsonDict = Dict[str, Any]
 
 
@@ -87,11 +86,18 @@ def build_trace(
     long_chars: Optional[int] = None,
     short_count: Optional[int] = None,
     long_count: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    forced_text: Optional[str] = None,
+    forced_token_id: Optional[int] = None,
 ) -> List[JsonDict]:
     if num_requests <= 0:
         raise ValueError("num_requests must be positive")
     if interval_seconds < 0:
         raise ValueError("interval_seconds must be non-negative")
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    if (forced_text is None) != (forced_token_id is None):
+        raise ValueError("forced_text and forced_token_id must be provided together")
 
     rng = random.Random(seed)
     profile_by_name = {profile.name: profile for profile in PROFILES}
@@ -126,11 +132,13 @@ def build_trace(
             index,
             rng,
             target_chars=target_chars_by_kind.get(profile_name),
+            request_nonce=request_id,
         )
+        output_tokens = max_tokens if max_tokens is not None else profile.max_tokens
         body = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": profile.max_tokens,
+            "max_tokens": output_tokens,
             "temperature": temperature,
             "stream": stream,
             "custom_params": {
@@ -141,6 +149,15 @@ def build_trace(
                 },
             },
         }
+        if forced_token_id is not None:
+            body["ignore_eos"] = True
+            body["stop"] = None
+            body["custom_params"].update(
+                {
+                    "forced_text": forced_text,
+                    "forced_token_id": int(forced_token_id),
+                }
+            )
         records.append(
             {
                 "request_id": request_id,
@@ -148,7 +165,7 @@ def build_trace(
                 "prompt_kind": profile.name,
                 "prompt_chars": len(prompt),
                 "prompt_words": len(prompt.split()),
-                "max_tokens": profile.max_tokens,
+                "max_tokens": output_tokens,
                 "stream": stream,
                 "ttft_slo_s": profile.ttft_slo_s,
                 "tpot_slo_s": profile.tpot_slo_s,
@@ -168,9 +185,7 @@ def _weighted_profile_names(num_requests: int, rng: random.Random) -> List[str]:
             names.extend([profile.name] * profile.count_weight)
     if remainder:
         weighted = [
-            profile.name
-            for profile in PROFILES
-            for _ in range(profile.count_weight)
+            profile.name for profile in PROFILES for _ in range(profile.count_weight)
         ]
         names.extend(weighted[:remainder])
     rng.shuffle(names)
@@ -182,6 +197,7 @@ def _make_prompt(
     index: int,
     rng: random.Random,
     target_chars: Optional[int] = None,
+    request_nonce: Optional[str] = None,
 ) -> str:
     topics = [
         "prefill pressure",
@@ -209,10 +225,11 @@ def _make_prompt(
         )
         for block_index in range(profile.repeat_blocks)
     ]
+    nonce_line = f"[request-nonce:{request_nonce or index}]\n"
     prompt = (
-        f"Request {index} is a {profile.name} workload sample for a PD runtime "
-        f"role flip experiment. {profile.answer_style}\n\n"
-        + "\n".join(blocks)
+        nonce_line
+        + f"Request {index} is a {profile.name} workload sample for a PD runtime "
+        f"role flip experiment. {profile.answer_style}\n\n" + "\n".join(blocks)
     )
     return _fit_prompt_to_chars(prompt, target_chars=target_chars)
 
@@ -337,9 +354,7 @@ def compute_metrics(
         "good_tpot_intervals": good_tpot_intervals,
         "total_tpot_intervals": total_tpot_intervals,
         "tpot_interval_attainment": (
-            good_tpot_intervals / total_tpot_intervals
-            if total_tpot_intervals
-            else None
+            good_tpot_intervals / total_tpot_intervals if total_tpot_intervals else None
         ),
         "ttft_met": ttft_met,
         "tpot_avg_met": tpot_avg_met,
@@ -407,11 +422,7 @@ def replay_trace(
     metrics = [item["metrics"] for item in results]
     responses = [item["response"] for item in results if item.get("response")]
     errors = [item["error_record"] for item in results if item.get("error_record")]
-    interval_rows = [
-        row
-        for item in results
-        for row in item.get("tpot_intervals", [])
-    ]
+    interval_rows = [row for item in results for row in item.get("tpot_intervals", [])]
 
     _write_mode_outputs(mode_dir, metrics, responses, errors, interval_rows)
     summary = summarize_metrics(metrics)
@@ -584,7 +595,9 @@ def _send_one_request(
     }
 
 
-def _build_http_request(url: str, body: JsonDict, api_key: Optional[str]) -> urllib.request.Request:
+def _build_http_request(
+    url: str, body: JsonDict, api_key: Optional[str]
+) -> urllib.request.Request:
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
@@ -667,9 +680,7 @@ def _append_ledger(
         "ttft_slo_seconds": float(record["ttft_slo_s"]),
         "tpot_slo_seconds": tpot_slo_s,
         "ttft_seconds": ttft_s,
-        "ttft_met": (
-            ttft_s is not None and ttft_s <= float(record["ttft_slo_s"])
-        ),
+        "ttft_met": (ttft_s is not None and ttft_s <= float(record["ttft_slo_s"])),
         "good_tpot_intervals": sum(1 for value in intervals if value <= tpot_slo_s),
         "total_tpot_intervals": len(intervals),
         "status": status,
@@ -852,6 +863,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--long-chars", type=int, default=None)
     generate.add_argument("--short-count", type=int, default=None)
     generate.add_argument("--long-count", type=int, default=None)
+    generate.add_argument("--max-tokens", type=int, default=None)
+    generate.add_argument("--forced-text", default=None)
+    generate.add_argument("--forced-token-id", type=int, default=None)
 
     replay = subparsers.add_parser("replay")
     replay.add_argument("--trace-jsonl", required=True)
@@ -889,6 +903,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             long_chars=args.long_chars,
             short_count=args.short_count,
             long_count=args.long_count,
+            max_tokens=args.max_tokens,
+            forced_text=args.forced_text,
+            forced_token_id=args.forced_token_id,
         )
         write_trace(trace, output_dir)
         print(json.dumps({"trace_requests": len(trace), "output_dir": str(output_dir)}))

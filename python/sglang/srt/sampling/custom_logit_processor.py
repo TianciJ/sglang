@@ -58,6 +58,35 @@ class DisallowedTokensLogitsProcessor(CustomLogitProcessor):
         return logits
 
 
+class ForcedSingleTokenLogitProcessor(CustomLogitProcessor):
+    """Allow exactly one configured token for each request in a batch."""
+
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        custom_param_list: Optional[List[Dict[str, Any]]] = None,
+    ) -> torch.Tensor:
+        if custom_param_list is None or len(custom_param_list) != logits.shape[0]:
+            raise ValueError("forced_token_id parameters must match batch size")
+
+        for batch_idx, params in enumerate(custom_param_list):
+            token_id = (
+                params.get("forced_token_id") if isinstance(params, dict) else None
+            )
+            if (
+                not isinstance(token_id, int)
+                or token_id < 0
+                or token_id >= logits.shape[-1]
+            ):
+                raise ValueError(
+                    f"invalid forced_token_id for batch row {batch_idx}: {token_id}"
+                )
+            logits[batch_idx, :] = -float("inf")
+            logits[batch_idx, token_id] = 0.0
+
+        return logits
+
+
 class ThinkingBudgetLogitProcessor(CustomLogitProcessor):
     """A logit processor that controls the length of thinking."""
 

@@ -13,7 +13,9 @@ class PDFlipTraceReplayTest(unittest.TestCase):
         )
 
         self.assertEqual(len(trace), 200)
-        self.assertEqual([r["arrival_offset_s"] for r in trace[:4]], [0.0, 1.0, 2.0, 3.0])
+        self.assertEqual(
+            [r["arrival_offset_s"] for r in trace[:4]], [0.0, 1.0, 2.0, 3.0]
+        )
         self.assertEqual(trace[-1]["arrival_offset_s"], 199.0)
 
         kinds = {record["prompt_kind"] for record in trace}
@@ -76,6 +78,76 @@ class PDFlipTraceReplayTest(unittest.TestCase):
             content = record["body"]["messages"][0]["content"]
             self.assertEqual(len(content), record["prompt_chars"])
 
+    def test_trace40_has_one_output_budget_and_distinct_prompts(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import build_trace
+
+        trace = build_trace(
+            num_requests=40,
+            interval_seconds=0.5,
+            model="deepseek_v3.1_terminus",
+            seed=7,
+            short_chars=1000,
+            long_chars=10000,
+            short_count=20,
+            long_count=20,
+            max_tokens=10000,
+            forced_text="字",
+            forced_token_id=1234,
+        )
+
+        prompts = [row["body"]["messages"][0]["content"] for row in trace]
+        first_lines = [prompt.splitlines()[0] for prompt in prompts]
+        self.assertEqual(len(set(prompts)), 40)
+        self.assertEqual(len(set(first_lines)), 40)
+        self.assertTrue(all(row["max_tokens"] == 10000 for row in trace))
+        self.assertTrue(all(row["body"]["max_tokens"] == 10000 for row in trace))
+        self.assertTrue(all(row["body"]["ignore_eos"] is True for row in trace))
+        self.assertTrue(all(row["body"]["stop"] is None for row in trace))
+        self.assertTrue(
+            all(
+                row["body"]["custom_params"]["forced_token_id"] == 1234 for row in trace
+            )
+        )
+        self.assertTrue(
+            all(row["body"]["custom_params"]["forced_text"] == "字" for row in trace)
+        )
+
+    def test_forced_trace_requires_complete_valid_output_contract(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import build_trace
+
+        common = {
+            "num_requests": 1,
+            "interval_seconds": 0.0,
+            "model": "deepseek_v3.1_terminus",
+            "seed": 7,
+        }
+        with self.assertRaisesRegex(ValueError, "max_tokens must be positive"):
+            build_trace(max_tokens=0, **common)
+        with self.assertRaisesRegex(ValueError, "forced_text and forced_token_id"):
+            build_trace(forced_text="字", **common)
+
+    def test_generate_cli_accepts_forced_output_contract(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "generate",
+                "--output-dir",
+                "/tmp/trace",
+                "--model",
+                "deepseek_v3.1_terminus",
+                "--max-tokens",
+                "10000",
+                "--forced-text",
+                "字",
+                "--forced-token-id",
+                "1234",
+            ]
+        )
+        self.assertEqual(args.max_tokens, 10000)
+        self.assertEqual(args.forced_text, "字")
+        self.assertEqual(args.forced_token_id, 1234)
+
     def test_extract_non_stream_text_handles_chat_message(self):
         from scripts.playground.disaggregation.pd_flip_trace_replay import (
             _extract_non_stream_text,
@@ -91,7 +163,9 @@ class PDFlipTraceReplayTest(unittest.TestCase):
         self.assertEqual(_extract_non_stream_text(choice), "think answer")
 
     def test_compute_metrics_reports_ttft_tpot_and_slo_attainment(self):
-        from scripts.playground.disaggregation.pd_flip_trace_replay import compute_metrics
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            compute_metrics,
+        )
 
         record = {
             "request_id": "trace-0001",
