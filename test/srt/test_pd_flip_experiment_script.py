@@ -302,6 +302,9 @@ class TestPDFlipExperimentScript(unittest.TestCase):
         self.assertEqual(values["BOOTSTRAP_PORT"], "8998")
         self.assertEqual(values["ROUTER_PORT"], "8000")
         self.assertIn("--page-size 64", values["EXTRA_SGLANG_ARGS"])
+        self.assertIn(
+            "--cuda-graph-max-bs-decode 64", values["EXTRA_SGLANG_ARGS"]
+        )
 
     def test_docker_env_declares_four_cloud_hosts_and_monitor_thresholds(self):
         values = self._read_docker_env()
