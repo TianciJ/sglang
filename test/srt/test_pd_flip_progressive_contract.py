@@ -301,6 +301,18 @@ def test_worker_can_create_a_named_stopped_experiment_container(tmp_path):
     assert "ARG=--rm" not in result.stdout
 
 
+def test_router_can_use_a_named_deepseek_container(tmp_path):
+    result = run_harness(
+        tmp_path,
+        "run_router.sh",
+        admin_key="secret",
+        PD_FLIP_ROUTER_CONTAINER_NAME="tiancij-pd-dsv3-router",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ARG=--name\nARG=tiancij-pd-dsv3-router" in result.stdout
+
+
 def test_router_rejects_a_key_the_controller_cannot_use(tmp_path):
     result = run_harness(
         tmp_path,

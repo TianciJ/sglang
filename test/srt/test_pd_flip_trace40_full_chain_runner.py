@@ -180,18 +180,19 @@ class Trace40FullChainRunnerTest(unittest.TestCase):
         self.assertIn("assert '--enable-custom-logit-processor' in decoded", source)
         self.assertIn("pd_flip_controller.py --prefill-donor-mode --router-url", source)
 
-    def test_router_is_restarted_after_workers_are_healthy(self):
+    def test_deepseek_router_is_started_after_workers_are_healthy(self):
         source = RUNNER.read_text(encoding="utf-8")
         worker_wait = source.index(
             'wait_http "${HOSTS[$i]}" "http://127.0.0.1:30000/health"'
         )
-        router_restart = source.index("docker restart tiancij-pd-router")
+        router_start = source.index("PD_FLIP_ROUTER_CONTAINER_NAME=")
         router_wait = source.index(
             'wait_http "${HOSTS[0]}" "http://127.0.0.1:8000/v1/models"'
         )
 
-        self.assertLess(worker_wait, router_restart)
-        self.assertLess(router_restart, router_wait)
+        self.assertLess(worker_wait, router_start)
+        self.assertLess(router_start, router_wait)
+        self.assertNotIn("docker restart tiancij-pd-router", source)
 
     def test_controller_source_and_target_have_defaults_and_env_overrides(self):
         source = RUNNER.read_text(encoding="utf-8")

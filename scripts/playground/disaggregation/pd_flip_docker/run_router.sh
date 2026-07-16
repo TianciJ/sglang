@@ -53,7 +53,16 @@ fi
 # shellcheck disable=SC2206
 extra_docker_args=(${EXTRA_DOCKER_ARGS:-})
 
-exec docker run --rm \
+docker_action=(run --rm)
+if [[ -n "${PD_FLIP_ROUTER_CONTAINER_NAME:-}" ]]; then
+  if [[ ! "${PD_FLIP_ROUTER_CONTAINER_NAME}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    echo "PD_FLIP_ROUTER_CONTAINER_NAME is invalid" >&2
+    exit 2
+  fi
+  docker_action=(run --rm --name "${PD_FLIP_ROUTER_CONTAINER_NAME}")
+fi
+
+exec docker "${docker_action[@]}" \
   -i \
   --network host \
   -e PD_FLIP_ROUTER_ADMIN_API_KEY \

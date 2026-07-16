@@ -25,11 +25,12 @@ esac
 HOSTS=(192.168.0.42 192.168.0.40 192.168.0.39 192.168.0.41)
 NAMES=(node0 node1 node2 node3)
 WORKER_CONTAINERS=(
-  tiancij-pd-node0
-  tiancij-pd-node1
-  tiancij-pd-node2
-  tiancij-pd-node3
+  tiancij-pd-dsv3-node0
+  tiancij-pd-dsv3-node1
+  tiancij-pd-dsv3-node2
+  tiancij-pd-dsv3-node3
 )
+ROUTER_CONTAINER="${PD_FLIP_ROUTER_CONTAINER_NAME:-tiancij-pd-dsv3-router}"
 NODE_URLS=(
   http://192.168.0.42:30000
   http://192.168.0.40:30000
@@ -189,7 +190,7 @@ preflight() {
   for i in "${!HOSTS[@]}"; do
     remote "${HOSTS[$i]}" "test -d '${SGLANG_REPO}' && test -d '${MODEL_PATH}' && docker image inspect '${IMAGE}' >/dev/null && docker inspect '${WORKER_CONTAINERS[$i]}' >/dev/null && (chronyc tracking 2>/dev/null || timedatectl status 2>/dev/null || true)"
   done
-  remote "${HOSTS[0]}" "test -s '${TRACE_PATH}' && docker inspect tiancij-pd-router >/dev/null && docker inspect tiancij-pd-store >/dev/null && docker inspect tiancij-pd-master >/dev/null && docker inspect tiancij-pd-metadata >/dev/null"
+  remote "${HOSTS[0]}" "test -s '${TRACE_PATH}' && docker inspect tiancij-pd-store >/dev/null && docker inspect tiancij-pd-master >/dev/null && docker inspect tiancij-pd-metadata >/dev/null"
   remote "${HOSTS[0]}" "python3 -c \"import json; rows=[json.loads(line) for line in open('${TRACE_PATH}', encoding='utf-8') if line.strip()]; assert len(rows) == 40; assert [row.get('prompt_kind') for row in rows] == ['long','short'] * 20; assert sum(row.get('prompt_chars') == 10000 for row in rows) == 20; assert sum(row.get('prompt_chars') == 1000 for row in rows) == 20; assert all(float(row.get('ttft_slo_s', 0)) > 0 and float(row.get('tpot_slo_s', 0)) > 0 for row in rows)\""
   if [[ "${DRY_RUN}" != "1" ]]; then
     for i in "${!HOSTS[@]}"; do
@@ -236,26 +237,25 @@ prepare_scheduled_trace() {
 
 start_shared_stack() {
   remote "${HOSTS[0]}" "docker start tiancij-pd-metadata tiancij-pd-master tiancij-pd-store >/dev/null"
-  remote "${HOSTS[0]}" "docker start tiancij-pd-node0 >/dev/null"
-  remote "${HOSTS[1]}" "docker start tiancij-pd-node1 >/dev/null"
-  remote "${HOSTS[2]}" "docker start tiancij-pd-node2 >/dev/null"
-  remote "${HOSTS[3]}" "docker start tiancij-pd-node3 >/dev/null"
+  remote "${HOSTS[0]}" "docker start '${WORKER_CONTAINERS[0]}' >/dev/null"
+  remote "${HOSTS[1]}" "docker start '${WORKER_CONTAINERS[1]}' >/dev/null"
+  remote "${HOSTS[2]}" "docker start '${WORKER_CONTAINERS[2]}' >/dev/null"
+  remote "${HOSTS[3]}" "docker start '${WORKER_CONTAINERS[3]}' >/dev/null"
   for i in "${!HOSTS[@]}"; do
     wait_http "${HOSTS[$i]}" "http://127.0.0.1:30000/health"
   done
-  # Router classifies workers only during discovery. Restart it after every
-  # worker is healthy so a slow prefill startup cannot be cached as an empty
-  # model/Plain worker for the whole experiment.
-  remote "${HOSTS[0]}" "docker restart tiancij-pd-router >/dev/null"
+  # Router classifies workers during discovery, so launch the DeepSeek router
+  # only after every worker is healthy. The runner reuses it when already up.
+  remote "${HOSTS[0]}" "if ! docker ps --filter 'name=^/${ROUTER_CONTAINER}$' --format '{{.Names}}' | grep -Fxq '${ROUTER_CONTAINER}'; then KEY=\$(docker inspect '${WORKER_CONTAINERS[0]}' --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; cd '${SGLANG_REPO}/scripts/playground/disaggregation/pd_flip_docker'; nohup env ENV_FILE='${SGLANG_REPO}/scripts/playground/disaggregation/pd_flip_docker/env.local' ADMIN_API_KEY=\"\$KEY\" PD_FLIP_ROUTER_CONTAINER_NAME='${ROUTER_CONTAINER}' ./run_router.sh > '${SGLANG_REPO}/pd-flip-router-dsv3.log' 2>&1 < /dev/null & fi"
   wait_http "${HOSTS[0]}" "http://127.0.0.1:8000/v1/models"
 }
 
 save_initial_status() {
-  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/status'; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); for item in 'node0 192.168.0.42' 'node1 192.168.0.40' 'node2 192.168.0.39' 'node3 192.168.0.41'; do set -- \$item; curl -fsS -H \"Authorization: Bearer \$KEY\" \"http://\$2:30000/pd_flip/runtime_role/status\" > '${RUN_DIR}/status/'\$1'-before.json'; curl -fsS -H \"Authorization: Bearer \$KEY\" \"http://\$2:30000/pd_flip/migration/status\" > '${RUN_DIR}/status/'\$1'-migration-before.json'; done"
+  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/status'; KEY=\$(docker inspect '${WORKER_CONTAINERS[0]}' --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); for item in 'node0 192.168.0.42' 'node1 192.168.0.40' 'node2 192.168.0.39' 'node3 192.168.0.41'; do set -- \$item; curl -fsS -H \"Authorization: Bearer \$KEY\" \"http://\$2:30000/pd_flip/runtime_role/status\" > '${RUN_DIR}/status/'\$1'-before.json'; curl -fsS -H \"Authorization: Bearer \$KEY\" \"http://\$2:30000/pd_flip/migration/status\" > '${RUN_DIR}/status/'\$1'-migration-before.json'; done"
 }
 
 start_measurement() {
-  remote "${HOSTS[0]}" "! docker inspect '${MEASURE_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${MEASURE_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -e PD_FLIP_ROUTER_ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000 --node name=node1,worker_url=http://192.168.0.40:30000 --node name=node2,worker_url=http://192.168.0.39:30000 --node name=node3,worker_url=http://192.168.0.41:30000 --api-key-env ADMIN_API_KEY --router-api-key-env PD_FLIP_ROUTER_ADMIN_API_KEY --interval-seconds 0.05 --duration-seconds '${MEASUREMENT_DURATION_SECONDS}' --output-events '${RUN_DIR}/metrics/events.jsonl'\""
+  remote "${HOSTS[0]}" "! docker inspect '${MEASURE_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect '${WORKER_CONTAINERS[0]}' --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${MEASURE_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -e PD_FLIP_ROUTER_ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000 --node name=node1,worker_url=http://192.168.0.40:30000 --node name=node2,worker_url=http://192.168.0.39:30000 --node name=node3,worker_url=http://192.168.0.41:30000 --api-key-env ADMIN_API_KEY --router-api-key-env PD_FLIP_ROUTER_ADMIN_API_KEY --interval-seconds 0.05 --duration-seconds '${MEASUREMENT_DURATION_SECONDS}' --output-events '${RUN_DIR}/metrics/events.jsonl'\""
 }
 
 start_workload() {
@@ -267,15 +267,15 @@ start_controller() {
   # Donor mode makes the original Prefill node authoritative for complete
   # prompt pages; target-local HiCache matching and source-full fallback are
   # forbidden by the controller protocol.
-  remote "${HOSTS[0]}" "! docker inspect '${CONTROLLER_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${CONTROLLER_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_controller.py --prefill-donor-mode --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000,router_worker_id=http://192.168.0.42:30000,bootstrap_port=8998 --node name=node1,worker_url=http://192.168.0.40:30000,router_worker_id=http://192.168.0.40:30000,bootstrap_port=8998 --node name=node2,worker_url=http://192.168.0.39:30000,router_worker_id=http://192.168.0.39:30000,bootstrap_port=8998 --node name=node3,worker_url=http://192.168.0.41:30000,router_worker_id=http://192.168.0.41:30000,bootstrap_port=8998 --api-key-env ADMIN_API_KEY --first-migration-ratio '${FIRST_MIGRATION_RATIO}' --observation-seconds '${OBSERVATION_SECONDS}' --slo-threshold '${SLO_THRESHOLD}' --min-prefill-slo-samples '${MIN_PREFILL_SAMPLES}' --min-decode-slo-samples '${MIN_DECODE_SAMPLES}' --session-journal-path '${RUN_DIR}/controller/pd_flip_session.json' --session-id-prefix '${RUN_ID}' monitor-progressive --trace-slo-ledger '${LEDGER}' --source-name '${SOURCE_NAME}' --migration-target-name '${MIGRATION_TARGET_NAME}' --iterations '${MONITOR_ITERATIONS}' --poll-interval '${MONITOR_POLL_INTERVAL}'\""
+  remote "${HOSTS[0]}" "! docker inspect '${CONTROLLER_CONTAINER}' >/dev/null 2>&1; KEY=\$(docker inspect '${WORKER_CONTAINERS[0]}' --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); test -n \"\$KEY\"; docker run -d --name '${CONTROLLER_CONTAINER}' --label 'pd-flip.run-id=${RUN_ID}' --network host -e ADMIN_API_KEY=\"\$KEY\" -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_controller.py --prefill-donor-mode --router-url http://127.0.0.1:8000 --node name=node0,worker_url=http://192.168.0.42:30000,router_worker_id=http://192.168.0.42:30000,bootstrap_port=8998 --node name=node1,worker_url=http://192.168.0.40:30000,router_worker_id=http://192.168.0.40:30000,bootstrap_port=8998 --node name=node2,worker_url=http://192.168.0.39:30000,router_worker_id=http://192.168.0.39:30000,bootstrap_port=8998 --node name=node3,worker_url=http://192.168.0.41:30000,router_worker_id=http://192.168.0.41:30000,bootstrap_port=8998 --api-key-env ADMIN_API_KEY --first-migration-ratio '${FIRST_MIGRATION_RATIO}' --observation-seconds '${OBSERVATION_SECONDS}' --slo-threshold '${SLO_THRESHOLD}' --min-prefill-slo-samples '${MIN_PREFILL_SAMPLES}' --min-decode-slo-samples '${MIN_DECODE_SAMPLES}' --session-journal-path '${RUN_DIR}/controller/pd_flip_session.json' --session-id-prefix '${RUN_ID}' monitor-progressive --trace-slo-ledger '${LEDGER}' --source-name '${SOURCE_NAME}' --migration-target-name '${MIGRATION_TARGET_NAME}' --iterations '${MONITOR_ITERATIONS}' --poll-interval '${MONITOR_POLL_INTERVAL}'\""
 }
 
 collect() {
-  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/logs' '${RUN_DIR}/controller' '${RUN_DIR}/report'; docker logs '${WORKLOAD_CONTAINER}' > '${RUN_DIR}/workload/container.log' 2>&1 || true; docker logs '${CONTROLLER_CONTAINER}' > '${RUN_DIR}/controller/controller.log' 2>&1 || true; docker logs '${MEASURE_CONTAINER}' > '${RUN_DIR}/metrics/container.log' 2>&1 || true; docker logs tiancij-pd-router > '${RUN_DIR}/logs/router.log' 2>&1 || true; docker logs tiancij-pd-store > '${RUN_DIR}/logs/mooncake-store.log' 2>&1 || true"
+  remote "${HOSTS[0]}" "mkdir -p '${RUN_DIR}/logs' '${RUN_DIR}/controller' '${RUN_DIR}/report'; docker logs '${WORKLOAD_CONTAINER}' > '${RUN_DIR}/workload/container.log' 2>&1 || true; docker logs '${CONTROLLER_CONTAINER}' > '${RUN_DIR}/controller/controller.log' 2>&1 || true; docker logs '${MEASURE_CONTAINER}' > '${RUN_DIR}/metrics/container.log' 2>&1 || true; docker logs '${ROUTER_CONTAINER}' > '${RUN_DIR}/logs/router.log' 2>&1 || true; docker logs tiancij-pd-store > '${RUN_DIR}/logs/mooncake-store.log' 2>&1 || true"
   for i in "${!HOSTS[@]}"; do
     remote "${HOSTS[$i]}" "docker logs '${WORKER_CONTAINERS[$i]}' 2>&1"       > "${RUN_DIR}/logs/${NAMES[$i]}.log" || true
   done
-  remote "${HOSTS[0]}" "KEY=\$(docker inspect tiancij-pd-node0 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); for item in 'node0 192.168.0.42' 'node1 192.168.0.40' 'node2 192.168.0.39' 'node3 192.168.0.41'; do set -- \$item; curl -fsS -H \"Authorization: Bearer \$KEY\" \"http://\$2:30000/pd_flip/runtime_role/status\" > '${RUN_DIR}/status/'\$1'-after.json' || true; done; docker run --rm --network host -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_migration_measure.py summarize --events-jsonl '${RUN_DIR}/metrics/events.jsonl' --controller-log '${RUN_DIR}/controller/controller.log' --request-metrics-jsonl '${RUN_DIR}/workload/state_machine/request_metrics.jsonl' --errors-jsonl '${RUN_DIR}/workload/state_machine/errors.jsonl' --output-dir '${RUN_DIR}/report'\" || true"
+  remote "${HOSTS[0]}" "KEY=\$(docker inspect '${WORKER_CONTAINERS[0]}' --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^ADMIN_API_KEY=//p'); for item in 'node0 192.168.0.42' 'node1 192.168.0.40' 'node2 192.168.0.39' 'node3 192.168.0.41'; do set -- \$item; curl -fsS -H \"Authorization: Bearer \$KEY\" \"http://\$2:30000/pd_flip/runtime_role/status\" > '${RUN_DIR}/status/'\$1'-after.json' || true; done; docker run --rm --network host -v '${SGLANG_REPO}:/sgl-workspace/sglang' -v /home/tiancij:/home/tiancij '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_migration_measure.py summarize --events-jsonl '${RUN_DIR}/metrics/events.jsonl' --controller-log '${RUN_DIR}/controller/controller.log' --request-metrics-jsonl '${RUN_DIR}/workload/state_machine/request_metrics.jsonl' --errors-jsonl '${RUN_DIR}/workload/state_machine/errors.jsonl' --output-dir '${RUN_DIR}/report'\" || true"
   log "artifacts: ${RUN_DIR}"
 }
 
