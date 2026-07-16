@@ -280,7 +280,7 @@ class TestPDFlipExperimentScript(unittest.TestCase):
         self.assertEqual(values["NODE2_HOST"], "cloud-101")
         self.assertEqual(values["NODE3_HOST"], "cloud-102")
         self.assertEqual(values["NODE0_ROLE"], "prefill")
-        self.assertEqual(values["NODE1_ROLE"], "prefill")
+        self.assertEqual(values["NODE1_ROLE"], "decode")
         self.assertEqual(values["NODE2_ROLE"], "decode")
         self.assertEqual(values["NODE3_ROLE"], "decode")
         self.assertIn("TTFT_SLO_SECONDS", values)

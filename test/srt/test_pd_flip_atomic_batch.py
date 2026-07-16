@@ -909,6 +909,7 @@ class TestSourceFinishAndAbort(unittest.TestCase):
         scheduler.pd_flip_quiesce_requested = True
         scheduler.pd_flip_batch_quiesced = True
         scheduler.pd_flip_migration_session = {
+            "session_id": "s",
             "role": "source",
             "source_entries": {},
             "manifests": [],
