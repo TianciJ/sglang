@@ -6,11 +6,30 @@ from scripts.playground.disaggregation.pd_flip_controller import (
     _migration_response_complete,
     _migration_response_failed,
     _migration_source_start_payload,
+    _order_manifests_by_requested_rids,
     _require_request_owners,
     _require_worker_dp_ranks,
     _request_owner_map,
     select_target_dp_rank,
 )
+
+
+def test_source_manifests_are_restored_to_controller_request_order():
+    manifests = [
+        {"rid": "rank-3-rid", "source_decode_dp_rank": 3},
+        {"rid": "waiting-rid", "source_decode_dp_rank": 7},
+        {"rid": "rank-2-rid", "source_decode_dp_rank": 2},
+    ]
+
+    ordered = _order_manifests_by_requested_rids(
+        manifests, ["rank-2-rid", "rank-3-rid"]
+    )
+
+    assert [manifest["rid"] for manifest in ordered] == [
+        "rank-2-rid",
+        "rank-3-rid",
+        "waiting-rid",
+    ]
 
 
 def test_index_dp_responses_requires_unique_ranks():

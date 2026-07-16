@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import pathlib
 import textwrap
 import time
@@ -73,6 +74,7 @@ def _load_scheduler_method(name):
         "PDFlipMigrationSourceStartReq": object,
         "PDFlipMigrationReqOutput": MigrationOutput,
         "DisaggregationMode": DisaggregationMode,
+        "dataclasses": dataclasses,
         "time": time,
     }
     exec(textwrap.dedent(ast.get_source_segment(source, method)), namespace)
@@ -122,6 +124,8 @@ def make_scheduler(*, running=(), waiting=()):
         "_pd_flip_waiting_req_skip_reason",
         "_pd_flip_classify_waiting_reqs",
         "_pd_flip_select_source_batch",
+        "_pd_flip_attn_dp_rank",
+        "_pd_flip_partition_rids",
     ):
         setattr(
             scheduler,
@@ -198,6 +202,38 @@ def test_source_start_builds_manifests_for_only_the_selected_running_prefix():
         "r0",
         "r1",
     ]
+
+
+@pytest.mark.parametrize(
+    ("local_running", "expected_handled", "expected_ignored"),
+    [
+        ([FakeReq("rank-3-rid")], ["rank-3-rid"], ["rank-2-rid"]),
+        ([], [], ["rank-2-rid", "rank-3-rid"]),
+    ],
+)
+def test_source_start_partitions_global_rids_by_local_dp_ownership(
+    local_running, expected_handled, expected_ignored
+):
+    scheduler = make_scheduler(running=local_running)
+    scheduler.disaggregation_mode = types.SimpleNamespace(value="decode")
+    scheduler.server_args = types.SimpleNamespace(
+        disaggregation_bootstrap_port=8998, dp_size=8
+    )
+    scheduler.ps = types.SimpleNamespace(attn_dp_rank=3, dp_rank=3)
+    scheduler._pd_flip_migration_status_dict = lambda: {}
+    scheduler._pd_flip_build_migration_manifest = lambda req: {"rid": req.rid}
+    scheduler._pd_flip_migration_room_for_req = lambda req: f"room-{req.rid}"
+    scheduler._pd_flip_start_source_entries = lambda reqs, manifests: ({}, "")
+    start = types.MethodType(
+        _load_scheduler_method("start_pd_flip_migration_source"), scheduler
+    )
+
+    output = start(PDFlipMigrationSourceStartReq(rids=["rank-2-rid", "rank-3-rid"]))
+
+    assert output.success
+    assert output.handled_rids == expected_handled
+    assert output.ignored_rids == expected_ignored
+    assert [manifest["rid"] for manifest in output.manifests] == expected_handled
 
 
 def test_source_start_rejects_non_prefix_or_out_of_order_selection():

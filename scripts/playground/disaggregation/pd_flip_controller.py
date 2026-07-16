@@ -1738,16 +1738,15 @@ class PDFlipController:
             _require_worker_dp_ranks(
                 source_start, source_dp_statuses, "source start"
             )
-            _require_request_owners(
-                source_start,
-                _manifest_rids(_strict_response_manifests(
-                    source_start, "invalid source start response manifests"
-                )),
-                "source start",
-            )
             manifests = _strict_response_manifests(
                 source_start, "invalid source start response manifests"
             )
+            _require_request_owners(
+                source_start,
+                _manifest_rids(manifests),
+                "source start",
+            )
+            manifests = _order_manifests_by_requested_rids(manifests, requested_rids)
             if target_decode_dp_rank is not None and any(
                 int(manifest.get("target_decode_dp_rank", -1))
                 != target_decode_dp_rank
@@ -4532,6 +4531,20 @@ def _aggregate_dp_runtime_status(items: List[JsonDict], node_name: str) -> JsonD
     aggregate["status"] = status
     aggregate["success"] = all(item.get("success", True) is True for item in items)
     return aggregate
+
+
+def _order_manifests_by_requested_rids(
+    manifests: List[JsonDict], requested_rids: Sequence[str]
+) -> List[JsonDict]:
+    """Restore controller selection order after asynchronous DP fan-out."""
+    by_rid = {str(manifest.get("rid")): manifest for manifest in manifests}
+    requested = [str(rid) for rid in requested_rids]
+    requested_set = set(requested)
+    return [by_rid[rid] for rid in requested if rid in by_rid] + [
+        manifest
+        for manifest in manifests
+        if str(manifest.get("rid")) not in requested_set
+    ]
 
 
 def _index_dp_responses(body: Any) -> Dict[int, JsonDict]:

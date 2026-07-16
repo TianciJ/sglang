@@ -2036,9 +2036,28 @@ class Scheduler(
         waiting_reqs = list(getattr(self, "waiting_queue", []))
         waiting_skipped = []
         scan_started = time.monotonic()
+        source_start_req = recv_req
+        source_rid_partition = {
+            "dp_rank": local_dp_rank,
+            "handled_rids": [],
+            "ignored_rids": [],
+        }
+        dp_size = int(getattr(getattr(self, "server_args", None), "dp_size", 1) or 1)
+        if recv_req.rids is not None and dp_size > 1:
+            local_running_rids = [
+                str(req.rid)
+                for req in getattr(getattr(self, "running_batch", None), "reqs", [])
+                if not req.finished()
+            ]
+            source_rid_partition = self._pd_flip_partition_rids(
+                recv_req.rids, local_running_rids
+            )
+            source_start_req = dataclasses.replace(
+                recv_req, rids=source_rid_partition["handled_rids"]
+            )
         try:
             selected_reqs = self._pd_flip_select_source_batch(
-                recv_req,
+                source_start_req,
                 waiting_reqs=waiting_reqs,
                 waiting_skipped_out=waiting_skipped,
             )
@@ -2055,14 +2074,14 @@ class Scheduler(
         ]
         running_count = (
             len(running_candidates)
-            if recv_req.rids is None
-            else len(recv_req.rids)
+            if source_start_req.rids is None
+            else len(source_start_req.rids)
         )
         running_reqs = selected_reqs[:running_count]
         timing_debug["scan_running_reqs_s"] = time.monotonic() - scan_started
         timing_debug["running_reqs"] = len(running_reqs)
 
-        if recv_req.include_waiting:
+        if source_start_req.include_waiting:
             waiting_indexes = {id(req): index for index, req in enumerate(waiting_reqs)}
             waiting_selected = [
                 (waiting_indexes[id(req)], req)
@@ -2176,7 +2195,7 @@ class Scheduler(
             "timing_debug": timing_debug,
             "prefill_donor_mode": prefill_donor_mode,
             "handled_rids": [str(manifest.get("rid") or "") for manifest in manifests],
-            "ignored_rids": [],
+            "ignored_rids": list(source_rid_partition["ignored_rids"]),
         }
         self.pd_flip_migration_session = session
         if real_entries:
@@ -2191,6 +2210,7 @@ class Scheduler(
             manifests=manifests,
             dp_rank=local_dp_rank,
             handled_rids=list(session["handled_rids"]),
+            ignored_rids=list(session["ignored_rids"]),
         )
 
     def prepare_pd_flip_migration_target(
