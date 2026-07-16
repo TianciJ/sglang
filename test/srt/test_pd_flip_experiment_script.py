@@ -290,11 +290,18 @@ class TestPDFlipExperimentScript(unittest.TestCase):
         )
 
     def test_docker_env_uses_deepseek_attention_dp8(self):
-        values = self._read_docker_env()
+        values = self._read_docker_env("env.local")
 
+        self.assertEqual(values["SGLANG_REPO"], "/home/tiancij/sglang-pd-deepseek-dp8")
         self.assertEqual(int(values["TP_SIZE"]), 8)
         self.assertEqual(int(values["DP_SIZE"]), 8)
         self.assertEqual(values["ENABLE_CUSTOM_LOGIT_PROCESSOR"], "1")
+        self.assertEqual(values["ENABLE_PD_FLIP_PREFILL_DONOR"], "1")
+        self.assertEqual(values["PD_FLIP_PREFILL_DONOR_MODE"], "1")
+        self.assertEqual(values["PORT"], "30000")
+        self.assertEqual(values["BOOTSTRAP_PORT"], "8998")
+        self.assertEqual(values["ROUTER_PORT"], "8000")
+        self.assertIn("--page-size 64", values["EXTRA_SGLANG_ARGS"])
 
     def test_docker_env_declares_four_cloud_hosts_and_monitor_thresholds(self):
         values = self._read_docker_env()
@@ -346,9 +353,9 @@ class TestPDFlipExperimentScript(unittest.TestCase):
         self.assertIn("nohup bash -lc", windows_runner)
         self.assertIn(".pid", windows_runner)
 
-    def _read_docker_env(self):
+    def _read_docker_env(self, filename="env.example"):
         values = {}
-        for line in (DOCKER_DIR / "env.example").read_text().splitlines():
+        for line in (DOCKER_DIR / filename).read_text().splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
