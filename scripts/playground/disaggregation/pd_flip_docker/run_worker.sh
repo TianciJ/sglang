@@ -125,6 +125,9 @@ fi
 
 gpu_request="${GPU_IDS:-all}"
 if [[ "${gpu_request}" != "all" ]]; then
+  if [[ "${EXTRA_DOCKER_ARGS:-}" != *"CUDA_VISIBLE_DEVICES"* ]]; then
+    extra_docker_args+=(-e "CUDA_VISIBLE_DEVICES=${GPU_IDS}")
+  fi
   gpu_request="\"device=${gpu_request}\""
 fi
 

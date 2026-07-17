@@ -122,6 +122,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn('ENABLE_DP_ATTENTION:-1', source)
         self.assertIn('GPU_IDS:-all', source)
         self.assertIn('gpu_request="\\"device=${gpu_request}\\""', source)
+        self.assertIn('CUDA_VISIBLE_DEVICES=${GPU_IDS}', source)
         self.assertIn('ENABLE_REQUEST_TIME_STATS_LOGGING:-0', source)
         self.assertIn('--served-model-name "${MODEL_ID}"', source)
 
