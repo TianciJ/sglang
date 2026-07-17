@@ -9,6 +9,7 @@ IMAGE="tiancij/sglang-upstream:v0.5.15-clean"
 EXPECTED_IMAGE_ID="sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e"
 TRACE_SHA256="82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964"
 TRACE_SOURCE="${TRACE_SOURCE:-${REPO_ROOT}/pd-flip-artifacts/qwen80b-trace40-source/trace.jsonl}"
+TRACE_MANIFEST_SOURCE="${TRACE_MANIFEST_SOURCE:-$(dirname "${TRACE_SOURCE}")/manifest.json}"
 EXPECTED_REQUESTS=40
 EXPECTED_TOKENS=10000
 EXPECTED_LEDGER_ROWS=400040
@@ -69,6 +70,7 @@ preflight() {
   require_secret
   assert_fixed_config
   [[ -f "${TRACE_SOURCE}" ]] || { echo "missing trace: ${TRACE_SOURCE}" >&2; return 2; }
+  [[ -f "${TRACE_MANIFEST_SOURCE}" ]] || { echo "missing trace manifest: ${TRACE_MANIFEST_SOURCE}" >&2; return 2; }
   [[ "$(sha256sum "${TRACE_SOURCE}" | awk '{print $1}')" == "${TRACE_SHA256}" ]] || { echo "local trace hash mismatch" >&2; return 2; }
   local expected_model="" index host image_id model_hash name gpu_list
   gpu_list="${GPU_IDS//,/ }"
@@ -142,6 +144,7 @@ prepare() {
   done
   ssh "${host}" "mkdir -p '${RUN_DIR}/trace' '${RUN_DIR}/raw' '${RUN_DIR}/logs' '${RUN_DIR}/inspect' '${RUN_DIR}/status' '${RUN_DIR}/smoke' '${RUN_DIR}/report'"
   scp "${TRACE_SOURCE}" "${host}:${RUN_DIR}/trace/trace.jsonl" >/dev/null
+  scp "${TRACE_MANIFEST_SOURCE}" "${host}:${RUN_DIR}/trace/source_manifest.json" >/dev/null
   ssh "${host}" "test \"\$(sha256sum '${RUN_DIR}/trace/trace.jsonl' | awk '{print \$1}')\" = '${TRACE_SHA256}'"
   router_sha="$(ssh "${host}" "sha256sum '${ROUTER_ARTIFACT_DIR}/sgl-router' | awk '{print \$1}'")"
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json' '${MODEL_PATH}/tokenizer.json'; find '${MODEL_PATH}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"

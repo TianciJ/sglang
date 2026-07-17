@@ -112,6 +112,7 @@ def test_exposes_complete_lifecycle_and_evidence_inventory():
         "tpot_tokens.csv",
         "manifest.json",
         "INVENTORY.txt",
+        "source_manifest.json",
     ):
         assert artifact in text
 

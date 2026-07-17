@@ -148,6 +148,7 @@ The controller node stores `${REMOTE_ARTIFACT_ROOT}/${RUN_ID}`:
 manifest.json
 INVENTORY.txt
 trace/trace.jsonl
+trace/source_manifest.json
 raw/slo_ledger.jsonl
 raw/upstream_baseline/request_metrics.jsonl
 raw/upstream_baseline/responses.jsonl
