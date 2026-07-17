@@ -42,6 +42,11 @@ redacted() {
   printf '%s\n' "${value}"
 }
 
+remote_code_hash() {
+  local host="$1"
+  ssh "${host}" "git -C '${SGLANG_REPO}' rev-parse HEAD 2>/dev/null || cat '${SGLANG_REPO}/.git/refs/heads/main'"
+}
+
 dry_note() {
   redacted "DRY-RUN $*"
 }
@@ -110,7 +115,7 @@ preflight() {
       ssh "${host}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${ROUTER_PORT})$'"
     fi
     ssh "${host}" "for gpu in ${gpu_list}; do test -z \"\$(nvidia-smi -i \"\$gpu\" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' || true)\" || { echo selected GPU \$gpu is busy >&2; exit 1; }; done"
-    code_hash="$(ssh "${host}" "git -C '${SGLANG_REPO}' rev-parse HEAD")"
+    code_hash="$(remote_code_hash "${host}")"
     model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
     image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
     if [[ -z "${expected_code}" ]]; then
@@ -196,7 +201,7 @@ write_mode_manifest() {
     role_switch_enabled=true
   fi
   trace_sha="$(ssh "${host}" "python3 -c \"import json; print(json.load(open('${RUN_DIR}/trace/manifest.json'))['trace_sha256'])\"")"
-  code_hash="$(ssh "${host}" "git -C '${SGLANG_REPO}' rev-parse HEAD")"
+  code_hash="$(remote_code_hash "${host}")"
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
   image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
   content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"

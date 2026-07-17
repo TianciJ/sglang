@@ -80,6 +80,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("--max-tokens '${TRACE_MAX_TOKENS}'", source)
         self.assertIn("model.safetensors.index.json", source)
         self.assertIn("weight_map", source)
+        self.assertIn(".git/refs/heads/main", source)
         self.assertIn("-printf '%f:%s", source)
         self.assertIn("ACTIVE_MODE", source)
         self.assertIn("trap 'on_failure", source)
