@@ -26,6 +26,8 @@ class ABReportTest(unittest.TestCase):
             "slo_window_seconds": 10,
             "slo_enter_threshold": 0.9,
             "slo_recover_threshold": 0.95,
+            "first_migration_ratio": 0.5,
+            "observation_seconds": 2.0,
             "hicache_stitch_enabled": False,
             "prefill_donor_enabled": False,
         }
@@ -137,7 +139,7 @@ class ABReportTest(unittest.TestCase):
                 {
                     "success": True,
                     "first_migration_ratio": 0.5,
-                    "observation_seconds": 3.0,
+                    "observation_seconds": 2.0,
                     "final_topology": "2P2D",
                     "state_trace": [
                         {"state": "first_migrating"},

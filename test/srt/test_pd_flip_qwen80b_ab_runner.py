@@ -47,7 +47,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             "TRACE_INTRA_WAVE_INTERVAL_SECONDS=0.5",
             "TRACE_WAVE_START_INTERVAL_SECONDS=7.5",
             "PD_FLIP_FIRST_MIGRATION_RATIO=0.5",
-            "PD_FLIP_OBSERVATION_SECONDS=3",
+            "PD_FLIP_OBSERVATION_SECONDS=2",
             "SLO_WINDOW_SECONDS=10",
             "SLO_ENTER_THRESHOLD=0.90",
             "SLO_RECOVER_THRESHOLD=0.95",

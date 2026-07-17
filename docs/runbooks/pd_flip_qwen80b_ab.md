@@ -3,7 +3,7 @@
 This runbook compares the same deterministic 40-request workload on two four-node configurations:
 
 - Baseline: stock static SGLang `1P3D`.
-- State machine: PD Flip starts at `1P3D`, migrates 50% of the selected decode source's active requests, observes for 3 seconds, migrates the remainder, and publishes the final `2P2D` topology.
+- State machine: PD Flip starts at `1P3D`, migrates 50% of the selected decode source's active requests, observes for 2 seconds, migrates the remainder, and publishes the final `2P2D` topology.
 
 The harness does not run Prefill Donor or HiCache stitching. It measures full source-decode request migration, including the model's auxiliary Mamba/GDN state when the runtime exposes it.
 
@@ -80,7 +80,7 @@ The sequence is:
 4. Start the read-only SLO observer and the 50 ms telemetry sampler, replay all 40 requests, and verify every request completed with exactly 10,000 matching output tokens.
 5. Capture logs, gracefully stop the exact baseline containers, verify ports and GPU driver health, and normalize request-stage evidence.
 6. Load the state-machine configuration through different owned container names and repeat the sequential health gates.
-7. Start telemetry and the progressive controller. On the first eligible TTFT violation, migrate 50%, observe for 3 seconds, and then either recover or migrate the remainder according to the configured policy.
+7. Start telemetry and the progressive controller. On the first eligible TTFT violation, migrate 50%, observe for 2 seconds, and then migrate the remainder according to the configured experiment policy.
 8. Verify the controller completed and the router reports `2P2D`, stop the sampler and owned containers, and normalize all migration evidence.
 9. Validate the pair and generate the comparison report.
 
@@ -132,7 +132,7 @@ Per-component KV-versus-Mamba byte counts remain `null` unless the backend repor
 
 ## Check validity before interpreting performance
 
-Open `comparison/summary.json` first. Do not quote a winner unless `valid` is true. Pair validity requires matching trace, model, code, image/GPU configuration, 40 completed requests in both modes, the 10,000-token output contract, successful controller completion, the configured 50%/3-second policy, and final `2P2D` evidence.
+Open `comparison/summary.json` first. Do not quote a winner unless `valid` is true. Pair validity requires matching trace, model, code, image/GPU configuration, 40 completed requests in both modes, the 10,000-token output contract, successful controller completion, the configured 50%/2-second policy, and final `2P2D` evidence.
 
 The baseline observer is read-only; it records when the same threshold would have fired but never mutates routing or worker state. In the state-machine result, use the controller snapshots/state trace and `migration_phase_events.jsonl` to identify the request and timestamp that triggered the switch and to divide requests into pre-trigger, migration, observation, and post-switch intervals.
 

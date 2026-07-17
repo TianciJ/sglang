@@ -218,6 +218,8 @@ def _validate(
         "slo_window_seconds",
         "slo_enter_threshold",
         "slo_recover_threshold",
+        "first_migration_ratio",
+        "observation_seconds",
     ):
         if baseline_manifest.get(key) != state_manifest.get(key):
             errors.append(f"{key} mismatch")
@@ -250,10 +252,14 @@ def _validate(
             errors.append(f"{mode} output contract failed")
     if controller.get("success") is not True:
         errors.append("state machine controller did not succeed")
-    if controller.get("first_migration_ratio") != 0.5:
-        errors.append("first migration ratio is not 0.5")
-    if controller.get("observation_seconds") != 3.0:
-        errors.append("observation duration is not 3 seconds")
+    if controller.get("first_migration_ratio") != state_manifest.get(
+        "first_migration_ratio"
+    ):
+        errors.append("controller first migration ratio does not match manifest")
+    if controller.get("observation_seconds") != state_manifest.get(
+        "observation_seconds"
+    ):
+        errors.append("controller observation duration does not match manifest")
     if controller.get("final_topology") != "2P2D":
         errors.append("final topology is not 2P2D")
     states = {
@@ -458,7 +464,7 @@ def generate_report(run_dir: Path) -> JsonDict:
         '<rect width="900" height="140" fill="white"/>'
         '<text x="20" y="35" font-family="sans-serif" font-size="20">Qwen3-Next 80B A/B timeline</text>'
         '<text x="20" y="75" font-family="sans-serif" font-size="14">Baseline: static 1P3D</text>'
-        '<text x="20" y="105" font-family="sans-serif" font-size="14">State machine: 1P3D → 50% → 3s observe → remaining → 2P2D</text>'
+        '<text x="20" y="105" font-family="sans-serif" font-size="14">State machine: 1P3D → 50% → 2s observe → remaining → 2P2D</text>'
         "</svg>\n",
         encoding="utf-8",
     )

@@ -75,14 +75,14 @@ When the state-machine run triggers:
 1. the router drains the selected source Decode worker;
 2. 50% of the source worker's active requests are migrated to the target Decode
    worker;
-3. the controller observes the system for exactly 3 seconds;
+3. the controller observes the system for exactly 2 seconds;
 4. the remaining source requests are migrated;
 5. old source state is released only after target commit; and
 6. the source changes role from Decode to Prefill and the router publishes the
    final `2P2D` topology.
 
 For this fixed-topology A/B experiment, the controller explicitly forces the
-second migration batch after the 3-second observation. The 95% recovery
+second migration batch after the 2-second observation. The 95% recovery
 threshold remains recorded as an observation metric; it does not cancel the
 required remaining batch. The controller's default behavior outside this
 experiment remains unchanged.
@@ -216,7 +216,7 @@ The state-machine run additionally records:
 5. target KV and Mamba slot allocation;
 6. first-batch base-state transfer;
 7. first-batch delta transfer, validation, and commit;
-8. the exact 3-second observation period;
+8. the exact 2-second observation period;
 9. second-batch base-state transfer;
 10. second-batch delta transfer, validation, and commit;
 11. source-state release;
@@ -238,7 +238,7 @@ Both runs are summarized over:
 - each arrival wave;
 - the interval before threshold crossing;
 - the first migration-equivalent window;
-- the 3-second observation-equivalent window;
+- the 2-second observation-equivalent window;
 - the second migration-equivalent window; and
 - the stable post-switch-equivalent window.
 
@@ -338,7 +338,7 @@ The paired experiment is invalid if any of the following occurs:
 - the trace does not contain exactly 40 valid requests;
 - a successful response produces other than 10,000 completion tokens;
 - the baseline role topology changes;
-- the state-machine run does not perform the 50% batch, 3-second observation,
+- the state-machine run does not perform the 50% batch, 2-second observation,
   remaining batch, and final `2P2D` commit;
 - required timing fields cannot be joined by request and run identifiers;
 - monotonic timestamps move backward on a single process;
