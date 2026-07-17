@@ -24,6 +24,49 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 JsonDict = Dict[str, Any]
 
 
+def extract_usage_cache_evidence(chunk: JsonDict) -> JsonDict:
+    """Extract portable OpenAI usage and optional SGLang cache breakdown."""
+    usage = chunk.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    prompt_details = usage.get("prompt_tokens_details")
+    prompt_details = prompt_details if isinstance(prompt_details, dict) else {}
+    cached_tokens = prompt_details.get("cached_tokens")
+
+    cache_details = usage.get("cached_tokens_details")
+    if not isinstance(cache_details, dict):
+        extension = chunk.get("sglang")
+        extension = extension if isinstance(extension, dict) else {}
+        cache_details = extension.get("cached_tokens_details")
+    cache_details = cache_details if isinstance(cache_details, dict) else {}
+
+    if not isinstance(cached_tokens, int) and cache_details:
+        components = [cache_details.get(key) for key in ("device", "host", "storage")]
+        if all(isinstance(value, int) for value in components):
+            cached_tokens = sum(components)
+
+    prefix_hit_ratio = None
+    if (
+        isinstance(prompt_tokens, int)
+        and prompt_tokens > 0
+        and isinstance(cached_tokens, int)
+    ):
+        prefix_hit_ratio = cached_tokens / prompt_tokens
+
+    return {
+        "prompt_tokens": prompt_tokens if isinstance(prompt_tokens, int) else None,
+        "completion_tokens": (
+            completion_tokens if isinstance(completion_tokens, int) else None
+        ),
+        "cached_tokens": cached_tokens if isinstance(cached_tokens, int) else None,
+        "cached_tokens_device": cache_details.get("device"),
+        "cached_tokens_host": cache_details.get("host"),
+        "cached_tokens_storage": cache_details.get("storage"),
+        "prefix_hit_ratio": prefix_hit_ratio,
+    }
+
+
 class OutputEvidenceBuilder:
     """Incrementally retain compact evidence for a generated response."""
 
@@ -529,6 +572,7 @@ def _send_one_request(
     forced_text = record.get("body", {}).get("custom_params", {}).get("forced_text")
     output_evidence = OutputEvidenceBuilder(forced_text=forced_text)
     usage_completion_tokens: Optional[int] = None
+    usage_evidence: JsonDict = {}
     finish_reason: Optional[str] = None
     upstream_request_id: Optional[str] = None
     status = "completed"
@@ -547,11 +591,17 @@ def _send_one_request(
                         break
                     chunk = json.loads(data)
                     upstream_request_id = chunk.get("id") or upstream_request_id
-                    usage = chunk.get("usage")
-                    if isinstance(usage, dict) and isinstance(
-                        usage.get("completion_tokens"), int
-                    ):
-                        usage_completion_tokens = usage["completion_tokens"]
+                    chunk_usage = extract_usage_cache_evidence(chunk)
+                    usage_evidence.update(
+                        {
+                            key: value
+                            for key, value in chunk_usage.items()
+                            if value is not None
+                        }
+                    )
+                    usage_completion_tokens = usage_evidence.get(
+                        "completion_tokens", usage_completion_tokens
+                    )
                     choice = (chunk.get("choices") or [{}])[0]
                     finish_reason = choice.get("finish_reason") or finish_reason
                     token_text = _extract_stream_text(choice)
@@ -580,11 +630,17 @@ def _send_one_request(
                 raw = response.read().decode("utf-8", errors="replace")
                 chunk = json.loads(raw)
                 upstream_request_id = chunk.get("id") or upstream_request_id
-                usage = chunk.get("usage")
-                if isinstance(usage, dict) and isinstance(
-                    usage.get("completion_tokens"), int
-                ):
-                    usage_completion_tokens = usage["completion_tokens"]
+                chunk_usage = extract_usage_cache_evidence(chunk)
+                usage_evidence.update(
+                    {
+                        key: value
+                        for key, value in chunk_usage.items()
+                        if value is not None
+                    }
+                )
+                usage_completion_tokens = usage_evidence.get(
+                    "completion_tokens", usage_completion_tokens
+                )
                 choice = (chunk.get("choices") or [{}])[0]
                 finish_reason = choice.get("finish_reason") or finish_reason
                 token_text = _extract_non_stream_text(choice)
@@ -641,6 +697,7 @@ def _send_one_request(
     metrics["end_wall"] = time.time()
     metrics["upstream_request_id"] = upstream_request_id
     metrics["finish_reason"] = finish_reason
+    metrics.update(usage_evidence)
     evidence = output_evidence.finish(
         int(record.get("body", {}).get("max_tokens") or record.get("max_tokens") or 0),
         usage_completion_tokens,
@@ -653,6 +710,16 @@ def _send_one_request(
         "upstream_request_id": upstream_request_id,
         "status": status,
         "finish_reason": finish_reason,
+        "client_send_wall": start_wall,
+        "first_token_wall": (
+            start_wall + first_token_monotonic - start_monotonic
+            if first_token_monotonic is not None
+            else None
+        ),
+        "last_token_wall": (
+            start_wall + token_times[-1] - start_monotonic if token_times else None
+        ),
+        **usage_evidence,
         **evidence,
     }
     error_record = (
@@ -669,6 +736,10 @@ def _send_one_request(
             "request_id": record["request_id"],
             "interval_index": index,
             "interval_s": value,
+            "token_received_at_monotonic": token_times[index],
+            "token_received_at_wall": (
+                start_wall + token_times[index] - start_monotonic
+            ),
             "tpot_slo_s": float(record["tpot_slo_s"]),
             "met": value <= float(record["tpot_slo_s"]),
         }

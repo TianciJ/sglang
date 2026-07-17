@@ -1,7 +1,98 @@
+import json
+import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
 class PDFlipTraceReplayTest(unittest.TestCase):
+    def test_send_one_request_persists_cache_and_token_timestamps(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            _send_one_request,
+        )
+
+        chunks = [
+            {
+                "id": "upstream-1",
+                "choices": [{"delta": {"content": "测"}, "finish_reason": None}],
+            },
+            {
+                "id": "upstream-1",
+                "choices": [
+                    {"delta": {"content": "测"}, "finish_reason": "length"}
+                ],
+            },
+            {
+                "id": "upstream-1",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": {"cached_tokens": 4},
+                    "cached_tokens_details": {
+                        "device": 1,
+                        "host": 2,
+                        "storage": 1,
+                    },
+                },
+            },
+        ]
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                for chunk in chunks:
+                    yield f"data: {json.dumps(chunk)}\n".encode()
+                    yield b"\n"
+                yield b"data: [DONE]\n"
+
+        record = {
+            "request_id": "req-1",
+            "arrival_offset_s": 0.0,
+            "ttft_slo_s": 5.0,
+            "tpot_slo_s": 5.0,
+            "body": {
+                "stream": True,
+                "max_tokens": 2,
+                "custom_params": {"forced_text": "测"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "urllib.request.urlopen", return_value=FakeResponse()
+        ):
+            result = _send_one_request(
+                record,
+                "http://router",
+                time.monotonic(),
+                10.0,
+                Path(directory) / "ledger.jsonl",
+                threading.Lock(),
+                None,
+                "baseline",
+            )
+
+        response = result["response"]
+        self.assertEqual(response["prompt_tokens"], 100)
+        self.assertEqual(response["cached_tokens"], 4)
+        self.assertEqual(response["cached_tokens_device"], 1)
+        self.assertEqual(response["cached_tokens_host"], 2)
+        self.assertEqual(response["cached_tokens_storage"], 1)
+        self.assertEqual(response["prefix_hit_ratio"], 0.04)
+        self.assertIsInstance(response["client_send_wall"], float)
+        self.assertIsInstance(response["first_token_wall"], float)
+        self.assertIsInstance(response["last_token_wall"], float)
+        self.assertEqual(len(result["tpot_intervals"]), 1)
+        self.assertIsInstance(
+            result["tpot_intervals"][0]["token_received_at_wall"], float
+        )
+
     def test_build_trace_creates_mixed_200_request_workload(self):
         from scripts.playground.disaggregation.pd_flip_trace_replay import build_trace
 
@@ -204,6 +295,61 @@ class PDFlipTraceReplayTest(unittest.TestCase):
         }
 
         self.assertEqual(_extract_non_stream_text(choice), "think answer")
+
+    def test_extract_usage_cache_evidence_records_prefix_hit_breakdown(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            extract_usage_cache_evidence,
+        )
+
+        evidence = extract_usage_cache_evidence(
+            {
+                "usage": {
+                    "prompt_tokens": 2000,
+                    "completion_tokens": 10000,
+                    "prompt_tokens_details": {"cached_tokens": 32},
+                    "cached_tokens_details": {
+                        "device": 8,
+                        "host": 16,
+                        "storage": 8,
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(evidence["prompt_tokens"], 2000)
+        self.assertEqual(evidence["completion_tokens"], 10000)
+        self.assertEqual(evidence["cached_tokens"], 32)
+        self.assertEqual(evidence["cached_tokens_device"], 8)
+        self.assertEqual(evidence["cached_tokens_host"], 16)
+        self.assertEqual(evidence["cached_tokens_storage"], 8)
+        self.assertAlmostEqual(evidence["prefix_hit_ratio"], 0.016)
+
+    def test_extract_usage_cache_evidence_accepts_sglang_extension_details(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            extract_usage_cache_evidence,
+        )
+
+        evidence = extract_usage_cache_evidence(
+            {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "prompt_tokens_details": {"cached_tokens": 7},
+                },
+                "sglang": {
+                    "cached_tokens_details": {
+                        "device": 2,
+                        "host": 3,
+                        "storage": 2,
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(evidence["cached_tokens"], 7)
+        self.assertEqual(evidence["cached_tokens_device"], 2)
+        self.assertEqual(evidence["cached_tokens_host"], 3)
+        self.assertEqual(evidence["cached_tokens_storage"], 2)
 
     def test_compute_metrics_reports_ttft_tpot_and_slo_attainment(self):
         from scripts.playground.disaggregation.pd_flip_trace_replay import (
