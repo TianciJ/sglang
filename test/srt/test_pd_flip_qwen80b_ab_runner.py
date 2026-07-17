@@ -82,6 +82,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("--observation-seconds", source)
         self.assertIn("--slo-recovery-threshold", source)
         self.assertIn("--force-second-migration-after-observation", source)
+
         self.assertIn("--window-seconds", source)
         self.assertIn("--max-tokens '${TRACE_MAX_TOKENS}'", source)
         self.assertIn("model.safetensors.index.json", source)
@@ -95,6 +96,17 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertNotIn("snapshot_download", source)
         self.assertNotIn("pkill", source)
         self.assertNotIn("kill -9", source)
+
+    def test_worker_health_gate_only_requires_runtime_role_for_state_machine(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        start = source.index("wait_worker()")
+        end = source.index("\n}\n\nwrite_mode_manifest", start)
+        body = source[start:end]
+
+        self.assertIn('worker_ip="${NODE_IPS[$index]}"', body)
+        self.assertIn('if [[ "${mode}" == "state_machine" ]]', body)
+        self.assertIn("http://${worker_ip}:${PORT}/health", body)
+        self.assertNotIn("http://127.0.0.1:${PORT}/health", body)
 
     def test_worker_supports_explicit_gpu_and_feature_gates(self):
         source = WORKER.read_text(encoding="utf-8")

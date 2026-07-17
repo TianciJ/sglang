@@ -188,8 +188,12 @@ CARGO_NET_OFFLINE=true"
 }
 
 wait_worker() {
-  local host="$1" role="$2" mode="$3" index="$4"
-  ssh "${host}" "source '${RUN_DIR}/${mode}/node${index}.env'; for attempt in \$(seq 1 1800); do if curl -fsS 'http://127.0.0.1:${PORT}/health' >/dev/null && curl -fsS -H \"Authorization: Bearer \${ADMIN_API_KEY}\" 'http://127.0.0.1:${PORT}/pd_flip/runtime_role/status' | python3 -c \"import json,sys; v=json.load(sys.stdin); xs=v if isinstance(v,list) else [v]; role='${role}'; assert xs and all(x.get('success') is True and x.get('status',{}).get('role')==role and x.get('status',{}).get('active_event_loop_role')==role for x in xs)\"; then exit 0; fi; sleep 2; done; exit 1"
+  local host="$1" role="$2" mode="$3" index="$4" worker_ip="${NODE_IPS[$index]}"
+  if [[ "${mode}" == "state_machine" ]]; then
+    ssh "${host}" "source '${RUN_DIR}/${mode}/node${index}.env'; for attempt in \$(seq 1 1800); do if curl -fsS 'http://${worker_ip}:${PORT}/health' >/dev/null && curl -fsS -H \"Authorization: Bearer \${ADMIN_API_KEY}\" 'http://${worker_ip}:${PORT}/pd_flip/runtime_role/status' | python3 -c \"import json,sys; v=json.load(sys.stdin); xs=v if isinstance(v,list) else [v]; role='${role}'; assert xs and all(x.get('success') is True and x.get('status',{}).get('role')==role and x.get('status',{}).get('active_event_loop_role')==role for x in xs)\"; then exit 0; fi; sleep 2; done; exit 1"
+  else
+    ssh "${host}" "for attempt in \$(seq 1 1800); do if curl -fsS 'http://${worker_ip}:${PORT}/health' >/dev/null; then exit 0; fi; sleep 2; done; exit 1"
+  fi
 }
 
 write_mode_manifest() {
