@@ -125,7 +125,7 @@ fi
 
 gpu_request="${GPU_IDS:-all}"
 if [[ "${gpu_request}" != "all" ]]; then
-  gpu_request="device=${gpu_request}"
+  gpu_request="\"device=${gpu_request}\""
 fi
 
 exec docker "${docker_action[@]}" \

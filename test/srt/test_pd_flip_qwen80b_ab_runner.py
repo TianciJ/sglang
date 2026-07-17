@@ -72,6 +72,10 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("pd_flip_req_timing.py", source)
         self.assertIn("PYTHONPATH=python:.", source)
         self.assertIn("printf -v extra_sglang_args_quoted '%q'", source)
+        self.assertIn(
+            'wait_worker "${host}" "${ROLES[$index]}" "${mode}" "${index}"',
+            source,
+        )
         self.assertIn("pd_flip_migration_measure.py", source)
         self.assertIn("monitor-progressive", source)
         self.assertIn("--first-migration-ratio", source)
@@ -96,6 +100,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         source = WORKER.read_text(encoding="utf-8")
         self.assertIn('ENABLE_DP_ATTENTION:-1', source)
         self.assertIn('GPU_IDS:-all', source)
+        self.assertIn('gpu_request="\\"device=${gpu_request}\\""', source)
         self.assertIn('ENABLE_REQUEST_TIME_STATS_LOGGING:-0', source)
         self.assertIn('--served-model-name "${MODEL_ID}"', source)
 

@@ -188,8 +188,8 @@ CARGO_NET_OFFLINE=true"
 }
 
 wait_worker() {
-  local host="$1" role="$2"
-  ssh "${host}" "for attempt in \$(seq 1 1800); do if curl -fsS 'http://127.0.0.1:${PORT}/health' >/dev/null && curl -fsS -H 'Authorization: Bearer ${ADMIN_API_KEY}' 'http://127.0.0.1:${PORT}/pd_flip/runtime_role/status' | python3 -c \"import json,sys; v=json.load(sys.stdin); xs=v if isinstance(v,list) else [v]; role='${role}'; assert xs and all(x.get('success') is True and x.get('status',{}).get('role')==role and x.get('status',{}).get('active_event_loop_role')==role for x in xs)\"; then exit 0; fi; sleep 2; done; exit 1"
+  local host="$1" role="$2" mode="$3" index="$4"
+  ssh "${host}" "source '${RUN_DIR}/${mode}/node${index}.env'; for attempt in \$(seq 1 1800); do if curl -fsS 'http://127.0.0.1:${PORT}/health' >/dev/null && curl -fsS -H \"Authorization: Bearer \${ADMIN_API_KEY}\" 'http://127.0.0.1:${PORT}/pd_flip/runtime_role/status' | python3 -c \"import json,sys; v=json.load(sys.stdin); xs=v if isinstance(v,list) else [v]; role='${role}'; assert xs and all(x.get('success') is True and x.get('status',{}).get('role')==role and x.get('status',{}).get('active_event_loop_role')==role for x in xs)\"; then exit 0; fi; sleep 2; done; exit 1"
 }
 
 write_mode_manifest() {
@@ -223,7 +223,7 @@ ENABLE_PD_RUNTIME_ROLE_SWITCH=1"
     local host="${SSH_HOSTS[$index]}"
     write_remote_env "${host}" "${mode}" "${index}" "${flags}"
     ssh "${host}" "cd '${SGLANG_REPO}' && nohup env ENV_FILE='${RUN_DIR}/${mode}/node${index}.env' scripts/playground/disaggregation/pd_flip_docker/run_worker.sh '${ROLES[$index]}' '${NODE_IPS[$index]}' > '${RUN_DIR}/${mode}/logs/node${index}.log' 2>&1 < /dev/null &"
-    wait_worker "${host}" "${ROLES[$index]}"
+    wait_worker "${host}" "${ROLES[$index]}" "${mode}" "${index}"
   done
   ssh "${SSH_HOSTS[0]}" "cd '${SGLANG_REPO}' && nohup env ENV_FILE='${RUN_DIR}/${mode}/node0.env' scripts/playground/disaggregation/pd_flip_docker/run_router.sh > '${RUN_DIR}/${mode}/logs/router.log' 2>&1 < /dev/null &"
   ssh "${SSH_HOSTS[0]}" "for attempt in \$(seq 1 300); do curl -fsS 'http://127.0.0.1:${ROUTER_PORT}/v1/models' >/dev/null && exit 0; sleep 1; done; exit 1"
