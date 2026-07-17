@@ -180,6 +180,7 @@ class PDClusterConfig:
     observation_seconds: float = 10.0
     slo_threshold: float = 0.9
     slo_recovery_threshold: float = 0.95
+    force_second_migration_after_observation: bool = False
     min_prefill_slo_samples: int = 20
     min_decode_slo_samples: int = 20
     session_journal_path: str = "pd_flip_session.json"
@@ -242,6 +243,9 @@ class PDClusterConfig:
             slo_threshold=float(data.get("slo_threshold", 0.9)),
             slo_recovery_threshold=float(
                 data.get("slo_recovery_threshold", 0.95)
+            ),
+            force_second_migration_after_observation=bool(
+                data.get("force_second_migration_after_observation", False)
             ),
             min_prefill_slo_samples=int(data.get("min_prefill_slo_samples", 20)),
             min_decode_slo_samples=int(data.get("min_decode_slo_samples", 20)),
@@ -1393,6 +1397,12 @@ class PDFlipController:
                 )
             decision = self._evaluate_progressive_snapshot(snapshot, observing=False)
             if decision is ProgressiveDecision.START:
+                trigger_evidence = getattr(slo_monitor, "trigger_evidence", None)
+                if callable(trigger_evidence):
+                    evidence = trigger_evidence()
+                    if evidence:
+                        snapshots[-1]["trigger"] = evidence
+                        state_trace[-1]["trigger"] = evidence
                 source = self._select_source(
                     metrics,
                     source_name=source_name,
@@ -2297,6 +2307,9 @@ class PDFlipController:
             self.config.min_decode_slo_samples,
             observing=observing,
             recover_threshold=self.config.slo_recovery_threshold,
+            force_commit_after_observation=(
+                self.config.force_second_migration_after_observation
+            ),
         )
 
     def _source_pending_requests(
@@ -4915,6 +4928,9 @@ def config_from_args(args: argparse.Namespace) -> PDClusterConfig:
         observation_seconds=args.observation_seconds,
         slo_threshold=args.slo_threshold,
         slo_recovery_threshold=args.slo_recovery_threshold,
+        force_second_migration_after_observation=(
+            args.force_second_migration_after_observation
+        ),
         min_prefill_slo_samples=args.min_prefill_slo_samples,
         min_decode_slo_samples=args.min_decode_slo_samples,
         session_journal_path=args.session_journal_path,
@@ -4954,6 +4970,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--observation-seconds", type=float, default=10.0)
     parser.add_argument("--slo-threshold", type=float, default=0.9)
     parser.add_argument("--slo-recovery-threshold", type=float, default=0.95)
+    parser.add_argument(
+        "--force-second-migration-after-observation",
+        action="store_true",
+        help="Always migrate the remaining source requests after observation.",
+    )
     parser.add_argument("--min-prefill-slo-samples", type=int, default=20)
     parser.add_argument("--min-decode-slo-samples", type=int, default=20)
     parser.add_argument("--session-journal-path", default="pd_flip_session.json")

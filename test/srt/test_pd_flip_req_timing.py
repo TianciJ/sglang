@@ -1,8 +1,78 @@
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
 
 class ReqTimingParserTest(unittest.TestCase):
+    def test_normalizes_timestamped_docker_log_file_to_rows_and_events(self):
+        from scripts.playground.disaggregation.pd_flip_req_timing import (
+            normalize_log_file,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "node0.docker.log"
+            path.write_text(
+                "2026-07-17T02:00:00.123456789Z ReqTimeStats("
+                "rid=req-7, bootstrap_room=701, input_len=2000, "
+                "cached_input_len=32, output_len=1, type=Prefill): "
+                "bootstrap_duration=10.00ms, queue_duration=20.00ms, "
+                "prefill_compute_duration=30.00ms, "
+                "transfer_prepare_duration=4.00ms, transfer_duration=6.00ms, "
+                "completion_duration=1.00ms, entry_time=1000.000\n"
+                "2026-07-17T02:00:01.000000000Z unrelated\n",
+                encoding="utf-8",
+            )
+
+            rows, events = normalize_log_file(path, worker="node0")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(events), 6)
+        self.assertEqual(rows[0]["source_file"], str(path))
+        self.assertEqual(rows[0]["source_line_number"], 1)
+        self.assertAlmostEqual(rows[0]["log_timestamp"], 1784253600.123456)
+        self.assertEqual(events[0]["request_id"], "req-7")
+        self.assertEqual(events[0]["worker"], "node0")
+        self.assertEqual(events[0]["source_line_number"], 1)
+
+    def test_cli_writes_request_and_flat_stage_jsonl(self):
+        from scripts.playground.disaggregation.pd_flip_req_timing import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "node2.log"
+            rows_path = root / "rows.jsonl"
+            events_path = root / "events.jsonl"
+            log.write_text(
+                "ReqTimeStats(rid=req-9, input_len=10, cached_input_len=0, "
+                "output_len=2, type=Decode): bootstrap_duration=1.00ms, "
+                "alloc_wait_duration=2.00ms, transfer_duration=3.00ms, "
+                "queue_duration=4.00ms, forward_duration=5.00ms, "
+                "entry_time=10.0\n",
+                encoding="utf-8",
+            )
+
+            exit_code = main(
+                [
+                    "--log",
+                    f"node2={log}",
+                    "--output",
+                    str(rows_path),
+                    "--events-output",
+                    str(events_path),
+                ]
+            )
+
+            rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+            events = [
+                json.loads(line) for line in events_path.read_text().splitlines()
+            ]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(rows[0]["worker"], "node2")
+        self.assertEqual(len(events), 5)
+        self.assertEqual(events[-1]["stage"], "decode.forward")
+
     def test_parses_detailed_prefill_stages_into_absolute_events(self):
         from scripts.playground.disaggregation.pd_flip_req_timing import (
             parse_req_time_stats_line,

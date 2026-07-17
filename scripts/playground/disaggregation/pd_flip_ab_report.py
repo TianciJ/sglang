@@ -80,6 +80,125 @@ def _write_csv(path: Path, rows: list[JsonDict], fields: list[str]) -> None:
         writer.writerows(rows)
 
 
+def _stage_rows(run_dir: Path) -> list[JsonDict]:
+    result: list[JsonDict] = []
+    for mode in ("baseline", "state_machine"):
+        for row in _read_jsonl(
+            run_dir / mode / "metrics" / "request_stage_events.jsonl"
+        ):
+            result.append({"mode": mode, **row})
+    return result
+
+
+def _slo_rows(run_dir: Path, controller: JsonDict) -> list[JsonDict]:
+    result: list[JsonDict] = []
+    for mode in ("baseline", "state_machine"):
+        for row in _read_jsonl(
+            run_dir / mode / "observer" / "snapshots.jsonl"
+        ):
+            result.append(
+                {
+                    "mode": mode,
+                    "source": "observer",
+                    "timestamp": row.get("observed_at"),
+                    "ttft_attainment": row.get("ttft_attainment"),
+                    "tpot_attainment": row.get("tpot_attainment"),
+                    "decision": row.get("decision"),
+                    "trigger_request_id": row.get("trigger_request_id"),
+                    "threshold_crossing_time": row.get("threshold_crossing_time"),
+                    "poll_detection_time": row.get("poll_detection_time"),
+                    "poll_lag_seconds": row.get("poll_lag_seconds"),
+                    "ttft_good": row.get("ttft_good"),
+                    "ttft_total": row.get("ttft_total"),
+                    "tpot_good": row.get("tpot_good"),
+                    "tpot_total": row.get("tpot_total"),
+                }
+            )
+    for row in controller.get("snapshots") or []:
+        if not isinstance(row, dict):
+            continue
+        trigger = row.get("trigger") if isinstance(row.get("trigger"), dict) else {}
+        result.append(
+            {
+                "mode": "state_machine",
+                "source": "controller",
+                "timestamp": row.get("timestamp"),
+                "ttft_attainment": row.get("prefill_slo_attainment"),
+                "tpot_attainment": row.get("decode_slo_attainment"),
+                "decision": None,
+                "trigger_request_id": trigger.get("trigger_request_id"),
+                "threshold_crossing_time": trigger.get("threshold_crossing_time"),
+                "poll_detection_time": trigger.get("poll_detection_time"),
+                "poll_lag_seconds": trigger.get("poll_lag_seconds"),
+                "ttft_good": None,
+                "ttft_total": None,
+                "tpot_good": None,
+                "tpot_total": None,
+            }
+        )
+    return sorted(result, key=lambda row: (row.get("timestamp") or 0, row["mode"]))
+
+
+def _trigger_summary(
+    trigger: JsonDict, rows: list[JsonDict], *, source: str
+) -> JsonDict:
+    request_id = trigger.get("trigger_request_id")
+    request = next((row for row in rows if row.get("request_id") == request_id), {})
+    return {
+        "source": source,
+        "request_id": request_id,
+        "prompt_kind": request.get("prompt_kind"),
+        "arrival_offset_s": request.get("arrival_offset_s"),
+        "ttft_s": request.get("ttft_s"),
+        "ttft_slo_s": request.get("ttft_slo_s"),
+        "threshold_crossing_time": trigger.get("threshold_crossing_time"),
+        "poll_detection_time": trigger.get("poll_detection_time"),
+        "poll_lag_seconds": trigger.get("poll_lag_seconds"),
+    }
+
+
+def _migration_rows(run_dir: Path) -> list[JsonDict]:
+    rows = _read_jsonl(
+        run_dir
+        / "state_machine"
+        / "metrics"
+        / "migration"
+        / "migration_phase_events.jsonl"
+    )
+    previous_by_request: dict[str, int] = {}
+    result: list[JsonDict] = []
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("request_id") or ""),
+            int(item.get("mono_ns") or 0),
+        ),
+    ):
+        request_id = str(row.get("request_id") or "")
+        mono_ns = row.get("mono_ns")
+        previous = previous_by_request.get(request_id)
+        duration = None
+        if isinstance(mono_ns, int) and previous is not None:
+            duration = (mono_ns - previous) / 1_000_000_000
+        if isinstance(mono_ns, int):
+            previous_by_request[request_id] = mono_ns
+        result.append(
+            {
+                "request_id": request_id,
+                "phase": row.get("phase"),
+                "worker": row.get("worker"),
+                "epoch_ns": row.get("epoch_ns"),
+                "mono_ns": mono_ns,
+                "duration_from_previous_s": duration,
+                "bytes": row.get("bytes"),
+                "page_count": row.get("page_count"),
+                "logical_start": row.get("logical_start"),
+                "logical_end": row.get("logical_end"),
+            }
+        )
+    return result
+
+
 def _validate(
     baseline_manifest: JsonDict,
     state_manifest: JsonDict,
@@ -88,9 +207,36 @@ def _validate(
     controller: JsonDict,
 ) -> list[str]:
     errors: list[str] = []
-    for key in ("trace_sha256", "model_fingerprint", "code_hash", "gpu_ids"):
+    for key in (
+        "trace_sha256",
+        "model_fingerprint",
+        "code_hash",
+        "image_id",
+        "gpu_ids",
+        "tp_size",
+        "dp_size",
+        "slo_window_seconds",
+        "slo_enter_threshold",
+        "slo_recover_threshold",
+    ):
         if baseline_manifest.get(key) != state_manifest.get(key):
             errors.append(f"{key} mismatch")
+    if baseline_manifest.get("initial_topology") != "1P3D" or state_manifest.get(
+        "initial_topology"
+    ) != "1P3D":
+        errors.append("both modes must start at 1P3D")
+    if baseline_manifest.get("state_machine_enabled") is not False or baseline_manifest.get(
+        "runtime_role_switch_enabled"
+    ) is not False:
+        errors.append("baseline is not a static SGLang topology")
+    if state_manifest.get("state_machine_enabled") is not True or state_manifest.get(
+        "runtime_role_switch_enabled"
+    ) is not True:
+        errors.append("state machine runtime flags are not enabled")
+    if state_manifest.get("hicache_stitch_enabled") is not False or state_manifest.get(
+        "prefill_donor_enabled"
+    ) is not False:
+        errors.append("state machine must disable HiCache stitch and Prefill Donor")
     for mode, rows in (("baseline", baseline_rows), ("state_machine", state_rows)):
         if len(rows) != 40:
             errors.append(f"{mode} request count is not 40")
@@ -110,6 +256,13 @@ def _validate(
         errors.append("observation duration is not 3 seconds")
     if controller.get("final_topology") != "2P2D":
         errors.append("final topology is not 2P2D")
+    states = {
+        row.get("state")
+        for row in controller.get("state_trace") or []
+        if isinstance(row, dict)
+    }
+    if not {"first_migrating", "observing", "second_migrating"}.issubset(states):
+        errors.append("state machine did not observe both migration batches")
     return errors
 
 
@@ -122,8 +275,11 @@ def generate_report(run_dir: Path) -> JsonDict:
     state_rows = _read_jsonl(
         run_dir / "state_machine" / "raw" / "request_metrics.jsonl"
     )
-    observer = _read_json(
+    baseline_observer = _read_json(
         run_dir / "baseline" / "observer" / "summary.json"
+    )
+    state_observer = _read_json(
+        run_dir / "state_machine" / "observer" / "summary.json"
     )
     controller = _read_json(
         run_dir / "state_machine" / "controller" / "result.json"
@@ -133,11 +289,24 @@ def generate_report(run_dir: Path) -> JsonDict:
     )
     baseline = _aggregate(baseline_rows)
     state_machine = _aggregate(state_rows)
-    trigger_raw = observer.get("first_trigger") or {}
-    trigger = {
-        "request_id": trigger_raw.get("trigger_request_id"),
-        "threshold_crossing_time": trigger_raw.get("threshold_crossing_time"),
-    }
+    baseline_trigger = _trigger_summary(
+        baseline_observer.get("first_trigger") or {},
+        baseline_rows,
+        source="observer",
+    )
+    controller_trigger = next(
+        (
+            row.get("trigger")
+            for row in controller.get("snapshots") or []
+            if isinstance(row, dict) and isinstance(row.get("trigger"), dict)
+        ),
+        None,
+    )
+    state_trigger = _trigger_summary(
+        controller_trigger or state_observer.get("first_trigger") or {},
+        state_rows,
+        source="controller" if controller_trigger else "observer",
+    )
     winner = None
     if not errors:
         baseline_joint = baseline.get("joint_attainment") or 0.0
@@ -152,7 +321,9 @@ def generate_report(run_dir: Path) -> JsonDict:
         "valid": not errors,
         "validity_errors": errors,
         "winner": winner,
-        "trigger": trigger,
+        "trigger": state_trigger or baseline_trigger,
+        "baseline_trigger": baseline_trigger,
+        "state_machine_trigger": state_trigger,
         "baseline": baseline,
         "state_machine": state_machine,
         "controller": controller,
@@ -184,19 +355,102 @@ def generate_report(run_dir: Path) -> JsonDict:
         comparison_rows,
         list(comparison_rows[0]) if comparison_rows else ["request_id"],
     )
-    _write_csv(output / "stage_timings.csv", [], ["mode", "request_id", "stage", "duration_s"])
-    _write_csv(output / "slo_timeseries.csv", [], ["mode", "timestamp", "ttft_attainment", "tpot_attainment"])
-    _write_csv(output / "migration_timings.csv", [], ["request_id", "phase", "duration_s", "bytes"])
+    _write_csv(
+        output / "stage_timings.csv",
+        _stage_rows(run_dir),
+        [
+            "mode",
+            "request_id",
+            "worker",
+            "role",
+            "stage",
+            "duration_s",
+            "started_at",
+            "finished_at",
+            "measurement_kind",
+            "source_file",
+            "source_line_number",
+        ],
+    )
+    _write_csv(
+        output / "slo_timeseries.csv",
+        _slo_rows(run_dir, controller),
+        [
+            "mode",
+            "source",
+            "timestamp",
+            "ttft_attainment",
+            "tpot_attainment",
+            "decision",
+            "trigger_request_id",
+            "threshold_crossing_time",
+            "poll_detection_time",
+            "poll_lag_seconds",
+            "ttft_good",
+            "ttft_total",
+            "tpot_good",
+            "tpot_total",
+        ],
+    )
+    _write_csv(
+        output / "migration_timings.csv",
+        _migration_rows(run_dir),
+        [
+            "request_id",
+            "phase",
+            "worker",
+            "epoch_ns",
+            "mono_ns",
+            "duration_from_previous_s",
+            "bytes",
+            "page_count",
+            "logical_start",
+            "logical_end",
+        ],
+    )
 
     verdict = (
         f"Provisional higher joint attainment: {winner}."
         if not errors
         else "Run is invalid; no performance winner is reported."
     )
+    def percent(value: Any) -> str:
+        return f"{float(value) * 100:.2f}%" if value is not None else "n/a"
+
+    trigger_lines = (
+        f"- Trigger request: `{state_trigger.get('request_id')}` "
+        f"({state_trigger.get('prompt_kind') or 'unknown'} prompt).\n"
+        f"- Threshold crossing: `{state_trigger.get('threshold_crossing_time')}`; "
+        f"controller poll: `{state_trigger.get('poll_detection_time')}`; "
+        f"poll lag: `{state_trigger.get('poll_lag_seconds')}` seconds.\n"
+    )
+    validity_text = (
+        "- none\n" if not errors else "".join(f"- {error}\n" for error in errors)
+    )
     (output / "report.md").write_text(
         "# Qwen3-Next 80B PD Flip A/B quick validation\n\n"
         + verdict
-        + "\n\nThis is one baseline run and one state-machine run; it is not statistically significant.\n",
+        + "\n\n## SLO result\n\n"
+        + "| Mode | TTFT attainment | TPOT interval attainment | Joint attainment |\n"
+        + "| --- | ---: | ---: | ---: |\n"
+        + f"| Baseline 1P3D | {percent(baseline.get('ttft_attainment'))} | "
+        + f"{percent(baseline.get('tpot_interval_attainment'))} | "
+        + f"{percent(baseline.get('joint_attainment'))} |\n"
+        + f"| PD Flip 1P3D to 2P2D | {percent(state_machine.get('ttft_attainment'))} | "
+        + f"{percent(state_machine.get('tpot_interval_attainment'))} | "
+        + f"{percent(state_machine.get('joint_attainment'))} |\n\n"
+        + "## State-machine trigger\n\n"
+        + trigger_lines
+        + "\n## Validity errors\n\n"
+        + validity_text
+        + "\n## Raw-backed detail\n\n"
+        + "- `request_comparison.csv`: paired client TTFT/TPOT and attainment.\n"
+        + "- `stage_timings.csv`: SGLang Prefill/Decode process stages with worker and source log line.\n"
+        + "- `slo_timeseries.csv`: observer and controller SLO windows, including trigger evidence.\n"
+        + "- `migration_timings.csv`: request migration phase timestamps, deltas, and bytes.\n"
+        + "- `timeline.svg`: compact baseline/state-machine topology timeline.\n\n"
+        + "This is one baseline run and one state-machine run; it is not statistically significant. "
+        + "The state-machine run measures full source-Decode hybrid-state migration, not Prefill Donor or HiCache stitching.\n",
         encoding="utf-8",
     )
     (output / "timeline.svg").write_text(

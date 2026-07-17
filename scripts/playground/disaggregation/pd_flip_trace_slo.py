@@ -84,6 +84,8 @@ class TraceSLOMonitor:
         self.client = client or HttpClient()
         self.time_fn = time_fn
         self.window_start_time: Optional[float] = None
+        self._last_records: List[JsonDict] = []
+        self._last_observed_at: Optional[float] = None
 
     def reset_window(self) -> None:
         """Start a fresh logical window without mutating the append-only ledger."""
@@ -92,6 +94,8 @@ class TraceSLOMonitor:
     def collect_cluster(self, nodes: Iterable[Tuple[str, str, str]]) -> ClusterSLOSnapshot:
         now = self.time_fn()
         latest = self._read_latest_records(now)
+        self._last_records = list(latest)
+        self._last_observed_at = now
         ttft_counts = self._ttft_counts(latest)
         tpot_counts = self._tpot_counts(latest)
         samples: List[NodeSLOSample] = []
@@ -123,6 +127,24 @@ class TraceSLOMonitor:
             decode_slo_attainment=tpot_counts.attainment,
             nodes=samples,
         )
+
+    def trigger_evidence(self) -> JsonDict:
+        if not self._last_records or self._last_observed_at is None:
+            return {}
+        row = max(
+            self._last_records,
+            key=lambda item: float(item.get("event_time") or 0.0),
+        )
+        crossing = float(row.get("event_time") or 0.0)
+        return {
+            "trigger_request_id": str(row.get("request_id")),
+            "threshold_crossing_time": crossing,
+            "poll_detection_time": self._last_observed_at,
+            "poll_lag_seconds": max(0.0, self._last_observed_at - crossing),
+            "prompt_kind": row.get("prompt_kind"),
+            "ttft_seconds": row.get("ttft_seconds"),
+            "ttft_slo_seconds": row.get("ttft_slo_seconds"),
+        }
 
     def _load(self, url: str) -> JsonDict:
         return _aggregate_loads(self.client.get_json(url, "/v1/loads?include=all"))

@@ -11,6 +11,7 @@ from typing import Any, Sequence
 
 from scripts.playground.disaggregation.pd_flip_prepare_trace import (
     apply_output_contract,
+    resolve_forced_token,
 )
 
 
@@ -45,6 +46,7 @@ def build_qwen80b_trace(
     forced_token_id: int,
     forced_text: str,
     custom_logit_processor: str,
+    max_tokens: int = 10_000,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index in range(40):
@@ -75,7 +77,7 @@ def build_qwen80b_trace(
         }
         apply_output_contract(
             row,
-            max_tokens=10_000,
+            max_tokens=max_tokens,
             forced_text=forced_text,
             forced_token_id=forced_token_id,
             custom_logit_processor=custom_logit_processor,
@@ -123,9 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-nonce", required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--forced-token-id", required=True, type=int)
+    parser.add_argument("--forced-token-id", type=int)
     parser.add_argument("--forced-text", required=True)
-    parser.add_argument("--custom-logit-processor", required=True)
+    parser.add_argument("--custom-logit-processor")
+    parser.add_argument("--tokenizer-path", type=Path)
+    parser.add_argument("--max-tokens", type=int, default=10_000)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     return parser
@@ -133,12 +137,37 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    forced_token_id = args.forced_token_id
+    custom_logit_processor = args.custom_logit_processor
+    if (forced_token_id is None) != (custom_logit_processor is None):
+        raise ValueError(
+            "forced-token-id and custom-logit-processor must be supplied together"
+        )
+    if forced_token_id is None:
+        if args.tokenizer_path is None:
+            raise ValueError(
+                "tokenizer-path is required when the forced contract is not supplied"
+            )
+        from transformers import AutoTokenizer
+
+        from sglang.srt.sampling.custom_logit_processor import (
+            ForcedSingleTokenLogitProcessor,
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(args.tokenizer_path),
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        forced_token_id = resolve_forced_token(tokenizer, args.forced_text)
+        custom_logit_processor = ForcedSingleTokenLogitProcessor.to_str()
     trace = build_qwen80b_trace(
         run_nonce=args.run_nonce,
         model=args.model,
-        forced_token_id=args.forced_token_id,
+        forced_token_id=forced_token_id,
         forced_text=args.forced_text,
-        custom_logit_processor=args.custom_logit_processor,
+        custom_logit_processor=custom_logit_processor,
+        max_tokens=args.max_tokens,
     )
     write_trace(trace, args.output, args.manifest)
 

@@ -22,7 +22,10 @@ def evaluate_slo_decision(
     *,
     observing: bool = False,
     recover_threshold: Optional[float] = None,
+    force_commit_after_observation: bool = False,
 ) -> ProgressiveDecision:
+    if observing and force_commit_after_observation:
+        return ProgressiveDecision.COMMIT
     if prefill_total < min_prefill_samples or decode_total < min_decode_samples:
         return ProgressiveDecision.INSUFFICIENT_SAMPLES
 

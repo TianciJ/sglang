@@ -6,6 +6,24 @@ from pathlib import Path
 
 
 class Qwen80BTraceTest(unittest.TestCase):
+    def test_output_budget_is_configurable_without_changing_prompt_schedule(self):
+        from scripts.playground.disaggregation.pd_flip_qwen80b_trace import (
+            build_qwen80b_trace,
+        )
+
+        trace = build_qwen80b_trace(
+            run_nonce="budget-test",
+            model="qwen80b",
+            forced_token_id=7,
+            forced_text="x",
+            custom_logit_processor="processor",
+            max_tokens=128,
+        )
+
+        self.assertEqual({row["body"]["max_tokens"] for row in trace}, {128})
+        self.assertEqual(len(trace), 40)
+        self.assertEqual(trace[-1]["arrival_offset_s"], 27.0)
+
     def _build(self):
         from scripts.playground.disaggregation.pd_flip_qwen80b_trace import (
             build_qwen80b_trace,
@@ -113,6 +131,34 @@ class Qwen80BTraceTest(unittest.TestCase):
         self.assertEqual(persisted_manifest, manifest)
         self.assertEqual(manifest["request_count"], 40)
         self.assertEqual(manifest["last_arrival_offset_s"], 27.0)
+
+    def test_cli_can_resolve_forced_contract_from_a_local_tokenizer(self):
+        from scripts.playground.disaggregation.pd_flip_qwen80b_trace import (
+            build_parser,
+        )
+
+        args = build_parser().parse_args(
+            [
+                "--run-nonce",
+                "run-1",
+                "--model",
+                "Qwen3-Next-80B-A3B-Instruct",
+                "--forced-text",
+                "测",
+                "--tokenizer-path",
+                "/models/Qwen3-Next-80B-A3B-Instruct",
+                "--output",
+                "/tmp/trace.jsonl",
+                "--manifest",
+                "/tmp/manifest.json",
+            ]
+        )
+
+        self.assertEqual(
+            args.tokenizer_path.as_posix(), "/models/Qwen3-Next-80B-A3B-Instruct"
+        )
+        self.assertIsNone(args.forced_token_id)
+        self.assertIsNone(args.custom_logit_processor)
 
 
 if __name__ == "__main__":

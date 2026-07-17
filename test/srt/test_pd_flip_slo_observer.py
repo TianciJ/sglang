@@ -130,6 +130,7 @@ class SLOObserverTest(unittest.TestCase):
         self.assertIn(
             "recover_threshold=self.config.slo_recovery_threshold", source
         )
+        self.assertIn('snapshots[-1]["trigger"]', source)
 
 
 if __name__ == "__main__":

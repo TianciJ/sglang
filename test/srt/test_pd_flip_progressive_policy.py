@@ -78,6 +78,25 @@ def test_observation_uses_a_separate_95_percent_recovery_threshold():
     )
 
 
+def test_forced_second_batch_commits_after_observation_even_if_slo_recovers():
+    m = load_policy_module()
+    assert (
+        m.evaluate_slo_decision(
+            19,
+            20,
+            20,
+            20,
+            0.9,
+            20,
+            100,
+            observing=True,
+            recover_threshold=0.95,
+            force_commit_after_observation=True,
+        )
+        is m.ProgressiveDecision.COMMIT
+    )
+
+
 def test_ratio_halves_until_first_n_requests_fit():
     m = load_policy_module()
     reqs = [m.RequestCapacity(str(i), 100) for i in range(8)]

@@ -3,13 +3,21 @@
 
 from __future__ import annotations
 
+import argparse
+import datetime as dt
+import json
 import re
-from typing import Any
+import sys
+from pathlib import Path
+from typing import Any, Sequence
 
 
 _REQ_TIME_STATS_RE = re.compile(r"ReqTimeStats\((?P<meta>.*?)\):\s*(?P<stats>.*)$")
 _DURATION_RE = re.compile(r"^(-?\d+(?:\.\d+)?)ms$")
 _FLOAT_PREFIX_RE = re.compile(r"^(-?\d+(?:\.\d+)?)")
+_DOCKER_TIMESTAMP_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+"
+)
 
 
 def _fields(value: str) -> dict[str, str]:
@@ -129,3 +137,77 @@ def parse_req_time_stats_line(
         "events": events,
         "source_line": line,
     }
+
+
+def _parse_docker_timestamp(line: str) -> float | None:
+    match = _DOCKER_TIMESTAMP_RE.match(line)
+    if match is None:
+        return None
+    value = match.group("timestamp")
+    date_part, time_part = value[:-1].split("T", 1)
+    if "." in time_part:
+        clock, fraction = time_part.split(".", 1)
+        time_part = f"{clock}.{(fraction + '000000')[:6]}"
+    normalized = f"{date_part}T{time_part}+00:00"
+    return dt.datetime.fromisoformat(normalized).timestamp()
+
+
+def normalize_log_file(path: Path, *, worker: str) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    events: list[dict] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_number, raw in enumerate(handle, 1):
+            line = raw.rstrip("\r\n")
+            row = parse_req_time_stats_line(
+                line, worker=worker, log_timestamp=_parse_docker_timestamp(line)
+            )
+            if row is None:
+                continue
+            row["source_file"] = str(path)
+            row["source_line_number"] = line_number
+            rows.append(row)
+            shared = {
+                key: value for key, value in row.items() if key not in {"events"}
+            }
+            for event in row["events"]:
+                events.append({**shared, **event})
+    return rows, events
+
+
+def _write_jsonl(path: Path, rows: Sequence[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _parse_log_spec(value: str) -> tuple[str, Path]:
+    worker, separator, path = value.partition("=")
+    if not separator or not worker or not path:
+        raise argparse.ArgumentTypeError("--log must be WORKER=PATH")
+    return worker, Path(path)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--log", action="append", type=_parse_log_spec, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--events-output", type=Path, required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    rows: list[dict] = []
+    events: list[dict] = []
+    for worker, path in args.log:
+        file_rows, file_events = normalize_log_file(path, worker=worker)
+        rows.extend(file_rows)
+        events.extend(file_events)
+    _write_jsonl(args.output, rows)
+    _write_jsonl(args.events_output, events)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

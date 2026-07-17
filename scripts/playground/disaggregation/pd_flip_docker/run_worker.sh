@@ -30,17 +30,25 @@ fi
 server_args=(
   python3 -m sglang.launch_server
   --model-path "${MODEL_PATH}"
+  --served-model-name "${MODEL_ID}"
   --host "${LOCAL_IP}"
   --port "${PORT}"
   --tp-size "${TP_SIZE}"
   --dp-size "${DP_SIZE}"
-  --enable-dp-attention
   --disaggregation-mode "${ROLE}"
   --disaggregation-transfer-backend "${TRANSFER_BACKEND}"
   --disaggregation-bootstrap-port "${BOOTSTRAP_PORT}"
   --disaggregation-ib-device "${IB_DEVICE}"
   --mem-fraction-static "${MEM_FRACTION_STATIC}"
 )
+
+if [[ "${ENABLE_DP_ATTENTION:-1}" == "1" ]]; then
+  server_args+=(--enable-dp-attention)
+fi
+
+if [[ "${ENABLE_REQUEST_TIME_STATS_LOGGING:-0}" == "1" ]]; then
+  server_args+=(--enable-request-time-stats-logging)
+fi
 
 if [[ "${ENABLE_CUSTOM_LOGIT_PROCESSOR:-0}" == "1" ]]; then
   server_args+=(--enable-custom-logit-processor)
@@ -115,8 +123,13 @@ elif [[ "${PD_FLIP_WORKER_CREATE_ONLY:-0}" == "1" ]]; then
   exit 2
 fi
 
+gpu_request="${GPU_IDS:-all}"
+if [[ "${gpu_request}" != "all" ]]; then
+  gpu_request="device=${gpu_request}"
+fi
+
 exec docker "${docker_action[@]}" \
-  --gpus all \
+  --gpus "${gpu_request}" \
   --network host \
   --ipc host \
   --privileged \
