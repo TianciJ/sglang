@@ -151,6 +151,10 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             self.assertIn("--network host", body)
             self.assertIn("'${IMAGE}'", body)
             self.assertIn("/sgl-workspace/sglang", body)
+        self.assertIn("${SGLANG_REPO}:/sgl-workspace/sglang:ro", observer_body)
+        self.assertIn("${SGLANG_REPO}:/sgl-workspace/sglang:ro", controller_body)
+        self.assertIn("--session-journal-path", controller_body)
+        self.assertIn("${RUN_DIR}/${mode}/controller/session.json", controller_body)
 
     def test_helper_containers_have_exact_owned_names_and_cleanup(self):
         source = RUNNER.read_text(encoding="utf-8")
