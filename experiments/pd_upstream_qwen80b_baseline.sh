@@ -23,6 +23,7 @@ WORKLOAD_TIMEOUT_SECONDS="${WORKLOAD_TIMEOUT_SECONDS:-7200}"
 
 SSH_HOSTS=("${NODE0_HOST}" "${NODE1_HOST}" "${NODE2_HOST}" "${NODE3_HOST}")
 NODE_IPS=("${NODE0_IP}" "${NODE1_IP}" "${NODE2_IP}" "${NODE3_IP}")
+MOONCAKE_HOSTS=("${NODE0_MOONCAKE_HOST}" "${NODE1_MOONCAKE_HOST}" "${NODE2_MOONCAKE_HOST}" "${NODE3_MOONCAKE_HOST}")
 ROLES=("${NODE0_ROLE}" "${NODE1_ROLE}" "${NODE2_ROLE}" "${NODE3_ROLE}")
 ACTIVE=0
 
@@ -44,7 +45,8 @@ assert_fixed_config() {
   [[ "${GPU_IDS}" == "0,1,2,3" ]] || { echo "GPU_IDS must be 0,1,2,3" >&2; return 2; }
   [[ "${TP_SIZE}" == "4" && "${DP_SIZE}" == "1" ]] || { echo "TP_SIZE=4 and DP_SIZE=1 are required" >&2; return 2; }
   [[ "${ROLES[*]}" == "prefill decode decode decode" ]] || { echo "roles must be 1P3D" >&2; return 2; }
-  [[ "${IB_DEVICE}" == "mlx5_0" ]] || { echo "IB_DEVICE must be mlx5_0" >&2; return 2; }
+  [[ "${IB_DEVICE}" == "mlx5_bond_0" ]] || { echo "IB_DEVICE must be mlx5_bond_0" >&2; return 2; }
+  [[ "${MC_USE_IPV6}" == "1" && "${MC_GID_INDEX}" == "3" ]] || { echo "Mooncake bond0 requires MC_USE_IPV6=1 and MC_GID_INDEX=3" >&2; return 2; }
   [[ "${MEM_FRACTION_STATIC}" == "0.88" ]] || { echo "MEM_FRACTION_STATIC must be 0.88" >&2; return 2; }
   [[ "${RUN_ID}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { echo "invalid RUN_ID" >&2; return 2; }
 }
@@ -54,7 +56,7 @@ dry_run() {
   echo "run_id=${RUN_ID} image=${IMAGE} image_id=${EXPECTED_IMAGE_ID}"
   echo "trace=${TRACE_SOURCE} trace_sha256=${TRACE_SHA256} requests=${EXPECTED_REQUESTS} max_tokens=${EXPECTED_TOKENS}"
   for index in 0 1 2 3; do
-    echo "node${index} ${ROLES[$index]} ${SSH_HOSTS[$index]} ${NODE_IPS[$index]} GPUs=${GPU_IDS} TP=${TP_SIZE} DP=${DP_SIZE}"
+    echo "node${index} ${ROLES[$index]} ${SSH_HOSTS[$index]} http=${NODE_IPS[$index]} mooncake=${MOONCAKE_HOSTS[$index]} ib=${IB_DEVICE} gid=${MC_GID_INDEX} GPUs=${GPU_IDS} TP=${TP_SIZE} DP=${DP_SIZE}"
   done
   echo "router $(router_name) workers=${NODE_IPS[*]} port=${ROUTER_PORT}"
   echo "helper $(helper_name) mounts host helper code at /work/sglang read-only; no GPU"
@@ -86,7 +88,8 @@ preflight() {
     [[ "${model_hash}" == "${expected_model}" ]] || { echo "${host}: model fingerprint mismatch" >&2; return 2; }
     ssh "${host}" "for gpu in ${gpu_list}; do test -z \"\$(nvidia-smi -i \"\$gpu\" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' || true)\" || { echo GPU \$gpu busy >&2; exit 1; }; done"
     ssh "${host}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${WORKER_PORT}|:${BOOTSTRAP_PORT})$'"
-    ssh "${host}" "nvidia-smi -L; nvidia-smi --query-gpu=index,uuid,memory.total,memory.used --format=csv,noheader; df -h '${MODEL_PATH}' /var/lib/docker; docker ps --no-trunc; ps -eo pid,user,args --sort=pid | grep -E 'sglang|mooncake|sgl-router' | grep -v grep || true; ip -brief address; ibv_devinfo -d '${IB_DEVICE}' | sed -n '1,80p'; date --iso-8601=ns; chronyc tracking 2>/dev/null || true"
+    ssh "${host}" "ibv_devinfo -d '${IB_DEVICE}' >/dev/null; show_gids | python3 -c \"import ipaddress,sys; rows=[x.split() for x in sys.stdin if x.startswith('${IB_DEVICE}')]; assert any(x[2]=='${MC_GID_INDEX}' and ipaddress.ip_address(x[3])==ipaddress.ip_address('${MOONCAKE_HOSTS[$index]}') for x in rows)\"; ip -6 addr show dev bond0 | grep -F '${MOONCAKE_HOSTS[$index]}/' >/dev/null"
+    ssh "${host}" "nvidia-smi -L; nvidia-smi --query-gpu=index,uuid,memory.total,memory.used --format=csv,noheader; df -h '${MODEL_PATH}' /var/lib/docker; docker ps --no-trunc; ps -eo pid,user,args --sort=pid | grep -E 'sglang|mooncake|sgl-router' | grep -v grep || true; ip -brief address; show_gids | grep -E '^${IB_DEVICE}[[:space:]]+1[[:space:]]+${MC_GID_INDEX}[[:space:]]+'; ibv_devinfo -d '${IB_DEVICE}' | sed -n '1,80p'; date --iso-8601=ns; chronyc tracking 2>/dev/null || true"
   done
   ssh "${SSH_HOSTS[0]}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${ROUTER_PORT})$'"
   echo "preflight passed; model_fingerprint=${expected_model}"
@@ -142,7 +145,7 @@ prepare() {
   ssh "${host}" "test \"\$(sha256sum '${RUN_DIR}/trace/trace.jsonl' | awk '{print \$1}')\" = '${TRACE_SHA256}'"
   router_sha="$(ssh "${host}" "sha256sum '${ROUTER_ARTIFACT_DIR}/sgl-router' | awk '{print \$1}'")"
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json' '${MODEL_PATH}/tokenizer.json'; find '${MODEL_PATH}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
-  ssh "${host}" "python3 -c \"import json; d={'run_id':'${RUN_ID}','mode':'upstream_baseline','validity':'pending','image':'${IMAGE}','image_id':'${EXPECTED_IMAGE_ID}','trace_sha256':'${TRACE_SHA256}','model_id':'${MODEL_ID}','model_fingerprint':'${model_hash}','router_sha256':'${router_sha}','topology':'1P3D','gpu_ids':'${GPU_IDS}','tp_size':${TP_SIZE},'dp_size':${DP_SIZE},'worker_port':${WORKER_PORT},'router_port':${ROUTER_PORT},'bootstrap_port':${BOOTSTRAP_PORT},'ib_device':'${IB_DEVICE}','mc_gid_index':'${MC_GID_INDEX}','mooncake_metadata':'P2PHANDSHAKE','mem_fraction_static':${MEM_FRACTION_STATIC},'client_instrumentation':'time.monotonic streaming receive events'}; open('${RUN_DIR}/manifest.json','w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
+  ssh "${host}" "python3 -c \"import json; d={'run_id':'${RUN_ID}','mode':'upstream_baseline','validity':'pending','image':'${IMAGE}','image_id':'${EXPECTED_IMAGE_ID}','trace_sha256':'${TRACE_SHA256}','model_id':'${MODEL_ID}','model_fingerprint':'${model_hash}','router_sha256':'${router_sha}','topology':'1P3D','gpu_ids':'${GPU_IDS}','tp_size':${TP_SIZE},'dp_size':${DP_SIZE},'worker_port':${WORKER_PORT},'router_port':${ROUTER_PORT},'bootstrap_port':${BOOTSTRAP_PORT},'ib_device':'${IB_DEVICE}','mc_use_ipv6':${MC_USE_IPV6},'mc_gid_index':'${MC_GID_INDEX}','mooncake_hosts':['${MOONCAKE_HOSTS[0]}','${MOONCAKE_HOSTS[1]}','${MOONCAKE_HOSTS[2]}','${MOONCAKE_HOSTS[3]}'],'mooncake_metadata':'P2PHANDSHAKE','mem_fraction_static':${MEM_FRACTION_STATIC},'client_instrumentation':'time.monotonic streaming receive events'}; open('${RUN_DIR}/manifest.json','w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
 }
 
 write_secret_env() {
@@ -152,20 +155,20 @@ write_secret_env() {
 }
 
 start_worker() {
-  local index="$1" host="${SSH_HOSTS[$index]}" ip="${NODE_IPS[$index]}" role="${ROLES[$index]}" name
+  local index="$1" host="${SSH_HOSTS[$index]}" ip="${NODE_IPS[$index]}" role="${ROLES[$index]}" moon_host="${MOONCAKE_HOSTS[$index]}" name
   name="$(worker_name "${index}")"
   write_secret_env "${index}"
-  ssh "${host}" bash -s -- "${name}" "${RUN_ID}" "${IMAGE}" "${EXPECTED_IMAGE_ID}" "${MODEL_PATH}" "${MODEL_ID}" "${ip}" "${role}" "${WORKER_PORT}" "${TP_SIZE}" "${DP_SIZE}" "${BOOTSTRAP_PORT}" "${IB_DEVICE}" "${MEM_FRACTION_STATIC}" "${GPU_IDS}" "${MC_GID_INDEX}" "${MOONCAKE_PROTOCOL}" "${RUN_DIR}/node${index}/worker.env" <<'REMOTE'
+  ssh "${host}" bash -s -- "${name}" "${RUN_ID}" "${IMAGE}" "${EXPECTED_IMAGE_ID}" "${MODEL_PATH}" "${MODEL_ID}" "${ip}" "${role}" "${WORKER_PORT}" "${TP_SIZE}" "${DP_SIZE}" "${BOOTSTRAP_PORT}" "${IB_DEVICE}" "${MEM_FRACTION_STATIC}" "${GPU_IDS}" "${MC_GID_INDEX}" "${MOONCAKE_PROTOCOL}" "${moon_host}" "${MC_USE_IPV6}" "${RUN_DIR}/node${index}/worker.env" <<'REMOTE'
 set -euo pipefail
 name="$1"; run_id="$2"; image="$3"; expected_image_id="$4"; model_path="$5"; model_id="$6"; ip="$7"; role="$8"; port="$9"; shift 9
-tp="$1"; dp="$2"; bootstrap="$3"; ib="$4"; mem="$5"; gpus="$6"; gid="$7"; protocol="$8"; env_file="$9"
+tp="$1"; dp="$2"; bootstrap="$3"; ib="$4"; mem="$5"; gpus="$6"; gid="$7"; protocol="$8"; moon_host="$9"; use_ipv6="${10}"; env_file="${11}"
 test "$(docker image inspect "$image" --format '{{.Id}}')" = "$expected_image_id"
 test -d /dev/infiniband
 docker run -d --name "$name" \
   --label tiancij.experiment=pd-upstream-qwen80b --label "tiancij.run_id=$run_id" \
   --gpus "device=$gpus" --network host --ipc host --privileged \
-  --env-file "$env_file" -e "CUDA_VISIBLE_DEVICES=$gpus" -e "MOONCAKE_LOCAL_HOSTNAME=$ip" \
-  -e "MOONCAKE_PROTOCOL=$protocol" -e "MC_GID_INDEX=$gid" \
+  --env-file "$env_file" -e "CUDA_VISIBLE_DEVICES=$gpus" -e "MOONCAKE_LOCAL_HOSTNAME=$moon_host" \
+  -e "MOONCAKE_PROTOCOL=$protocol" -e "MC_USE_IPV6=$use_ipv6" -e "MC_GID_INDEX=$gid" \
   -v "$model_path:$model_path:ro" -v /dev/infiniband:/dev/infiniband \
   "$image" bash -lc 'cd /sgl-workspace/sglang && exec python3 -m sglang.launch_server \
     --model-path '"$model_path"' --served-model-name '"$model_id"' --host '"$ip"' --port '"$port"' \
@@ -228,14 +231,59 @@ start_all() {
 smoke() {
   require_secret
   local host="${SSH_HOSTS[0]}" index
-  ssh "${host}" "python3 -c \"import json,urllib.request; key='${ADMIN_API_KEY}'; url='http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions'; base={'model':'${MODEL_ID}','max_tokens':8,'stream':False,'ignore_eos':True};
-for i in range(2):
- d=dict(base,messages=[{'role':'user','content':f'upstream-smoke-${RUN_ID}-{i}-never-in-formal-trace'}]); r=urllib.request.Request(url,data=json.dumps(d).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+key}); out=json.load(urllib.request.urlopen(r,timeout=600)); assert out.get('choices') and out['choices'][0].get('message',{}).get('content'); open('${RUN_DIR}/smoke/response-'+str(i)+'.json','w').write(json.dumps(out)+'\\n')\""
-  local flush_ok=1
+  ssh "${host}" bash -s -- "${RUN_DIR}/node0/worker.env" "${ROUTER_PORT}" "${MODEL_ID}" "${RUN_ID}" "${RUN_DIR}" <<'REMOTE'
+set -euo pipefail
+env_file="$1"; router_port="$2"; model_id="$3"; run_id="$4"; run_dir="$5"
+set -a
+source "$env_file"
+set +a
+python3 - "$router_port" "$model_id" "$run_id" "$run_dir" <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+router_port, model_id, run_id, run_dir = sys.argv[1:]
+key = os.environ["ADMIN_API_KEY"]
+url = f"http://127.0.0.1:{router_port}/v1/chat/completions"
+base = {"model": model_id, "max_tokens": 8, "stream": False, "ignore_eos": True}
+for index in range(2):
+    body = dict(
+        base,
+        messages=[
+            {
+                "role": "user",
+                "content": f"upstream-smoke-{run_id}-{index}-never-in-formal-trace",
+            }
+        ],
+    )
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+    )
+    with urllib.request.urlopen(request, timeout=600) as response:
+        output = json.load(response)
+    assert output.get("choices") and output["choices"][0].get("message", {}).get("content")
+    with open(f"{run_dir}/smoke/response-{index}.json", "w", encoding="utf-8") as handle:
+        json.dump(output, handle)
+        handle.write("\n")
+PY
+REMOTE
+  local flush_ok=1 flush_response
   for index in 0 1 2 3; do
-    if ! ssh "${SSH_HOSTS[$index]}" "curl -fsS -X POST -H 'Authorization: Bearer ${ADMIN_API_KEY}' 'http://${NODE_IPS[$index]}:${WORKER_PORT}/flush_cache'" | \
-      ssh "${host}" "cat > '${RUN_DIR}/smoke/flush-node${index}.json'"; then
+    if ! flush_response="$(ssh "${SSH_HOSTS[$index]}" bash -s -- "${RUN_DIR}/node${index}/worker.env" "http://${NODE_IPS[$index]}:${WORKER_PORT}/flush_cache" <<'REMOTE'
+set -euo pipefail
+env_file="$1"; url="$2"
+set -a
+source "$env_file"
+set +a
+curl -fsS -X POST -H "Authorization: Bearer ${ADMIN_API_KEY}" "$url"
+REMOTE
+)"; then
       flush_ok=0
+    else
+      printf '%s\n' "${flush_response}" | ssh "${host}" "cat > '${RUN_DIR}/smoke/flush-node${index}.json'"
     fi
   done
   if [[ "${flush_ok}" != "1" ]]; then

@@ -40,7 +40,11 @@ must still be recorded.
 - Data parallelism: 1.
 - Topology: one Prefill worker and three Decode workers (`1P3D`).
 - Transfer backend: upstream Mooncake.
-- RDMA device: `mlx5_0`; use the preflight-validated routable GID configuration.
+- RDMA device: `mlx5_bond_0` on all four nodes, with the preflight-validated
+  per-node IPv6 bond address, `MC_USE_IPV6=1`, and GID index 3. The original
+  draft named `mlx5_0`, but the 2026-07-17 read-only preflight proved that
+  node 099 no longer exposes that device after reboot while all four nodes do
+  expose an active `mlx5_bond_0` RoCE v2 path.
 - Static memory fraction: 0.88.
 - DP attention: disabled.
 - Prefix state: cold for the measured trace after a successful smoke test.
@@ -64,7 +68,7 @@ python3 -m sglang.launch_server
 --disaggregation-mode prefill|decode
 --disaggregation-transfer-backend mooncake
 --disaggregation-bootstrap-port 8998
---disaggregation-ib-device mlx5_0
+--disaggregation-ib-device mlx5_bond_0
 --mem-fraction-static 0.88
 --enable-custom-logit-processor
 --enable-request-time-stats-logging

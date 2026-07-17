@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 RUNNER = ROOT / "experiments" / "pd_upstream_qwen80b_baseline.sh"
 ENV_EXAMPLE = ROOT / "experiments" / "pd_upstream_qwen80b_baseline.env.example"
+RUNBOOK = ROOT / "docs" / "runbooks" / "pd_upstream_qwen80b_baseline.md"
 
 
 def source() -> str:
@@ -123,7 +124,30 @@ def test_env_example_contains_no_real_secret_and_fixed_topology():
     assert "DP_SIZE=1" in text
     assert "NODE0_ROLE=prefill" in text
     assert text.count("_ROLE=decode") == 3
+    assert "IB_DEVICE=mlx5_bond_0" in text
+    assert "MC_USE_IPV6=1" in text
     assert "MC_GID_INDEX=3" in text
+    for suffix in ("6240", "7b80", "6600", "5f00"):
+        assert f"fd03:4514:80:{suffix}::1" in text
+
+
+def test_passes_validated_ipv6_mooncake_identity_separately_from_http_ip():
+    text = source()
+    assert 'MOONCAKE_HOSTS=(' in text
+    assert 'moon_host="${MOONCAKE_HOSTS[$index]}"' in text
+    assert '-e "MOONCAKE_LOCAL_HOSTNAME=$moon_host"' in text
+    assert '-e "MC_USE_IPV6=$use_ipv6"' in text
+    assert "show_gids" in text
+    assert "mooncake_hosts" in text
+    assert "mc_use_ipv6" in text
+
+
+def test_smoke_reads_secret_from_remote_env_without_putting_it_in_ssh_command():
+    text = source()
+    assert "key='${ADMIN_API_KEY}'" not in text
+    assert 'ssh "${SSH_HOSTS[$index]}" "curl' not in text
+    assert 'key = os.environ["ADMIN_API_KEY"]' in text
+    assert 'source "$env_file"' in text
 
 
 def test_dry_run_is_redacted_and_does_not_contact_nodes():
@@ -146,3 +170,23 @@ def test_dry_run_is_redacted_and_does_not_contact_nodes():
     assert "ssh " not in result.stdout
     assert re.search(r"node0.*prefill", result.stdout)
     assert re.search(r"node[123].*decode", result.stdout)
+
+
+def test_runbook_covers_operator_sequence_and_artifact_boundary():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    for command in ("preflight", "build-router", "dry-run", "run", "collect-stop", "report"):
+        assert f" {command}" in text
+    for artifact in (
+        "slo_ledger.jsonl",
+        "request_metrics.jsonl",
+        "responses.jsonl",
+        "errors.jsonl",
+        "tpot_tokens.csv",
+        "manifest.json",
+        "INVENTORY.txt",
+    ):
+        assert artifact in text
+    assert "client-observed" in text
+    assert "one measured run" in text
+    assert "P2PHANDSHAKE" in text
+    assert "forensic" in text
