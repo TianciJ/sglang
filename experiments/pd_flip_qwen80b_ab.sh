@@ -72,6 +72,11 @@ router_name() {
   printf 'tiancij-qwen80b-%s-%s-router' "${RUN_ID}" "$1"
 }
 
+helper_name() {
+  local mode="$1" component="$2"
+  printf 'tiancij-qwen80b-%s-%s-%s' "${RUN_ID}" "${mode}" "${component}"
+}
+
 on_failure() {
   local status="${1:-1}" mode="${ACTIVE_MODE}"
   trap - ERR INT TERM
@@ -80,7 +85,12 @@ on_failure() {
   fi
   set +e
   echo "abnormal exit; gracefully cleaning exact owned resources for ${RUN_ID}/${mode}" >&2
-  ssh "${SSH_HOSTS[0]}" "for item in 'migration_sampler:pd_flip_migration_measure.py sample' 'observer:pd_flip_slo_observer.py' 'controller:pd_flip_controller.py'; do component=\${item%%:*}; pattern=\${item#*:}; pid_file='${RUN_DIR}/${mode}/pids/'\$component'.pid'; test -f \"\$pid_file\" || continue; pid=\$(cat \"\$pid_file\"); if kill -0 \"\$pid\" 2>/dev/null && tr '\\0' ' ' < /proc/\$pid/cmdline | grep -F \"\$pattern\" >/dev/null; then kill -TERM \"\$pid\"; fi; done"
+  ssh "${SSH_HOSTS[0]}" "pid_file='${RUN_DIR}/${mode}/pids/migration_sampler.pid'; if test -f \"\$pid_file\"; then pid=\$(cat \"\$pid_file\"); if kill -0 \"\$pid\" 2>/dev/null && tr '\\0' ' ' < /proc/\$pid/cmdline | grep -F 'pd_flip_migration_measure.py sample' >/dev/null; then kill -TERM \"\$pid\"; fi; fi"
+  local component helper
+  for component in observer controller; do
+    helper="$(helper_name "${mode}" "${component}")"
+    ssh "${SSH_HOSTS[0]}" "if docker inspect '${helper}' >/dev/null 2>&1; then docker logs --timestamps '${helper}' >> '${RUN_DIR}/${mode}/logs/${component}.log' 2>&1 || true; docker rm -f '${helper}' >/dev/null; fi"
+  done
   local router
   router="$(router_name "${mode}")"
   ssh "${SSH_HOSTS[0]}" "if docker inspect '${router}' >/dev/null 2>&1; then docker logs --timestamps '${router}' > '${RUN_DIR}/${mode}/logs/router.failure.docker.log' 2>&1 || true; docker stop --time 1800 '${router}' >/dev/null; fi"
@@ -246,9 +256,22 @@ start_sampler() {
   ssh "${host}" "cd '${SGLANG_REPO}'; nohup env ADMIN_API_KEY='${ADMIN_API_KEY}' python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url 'http://127.0.0.1:${ROUTER_PORT}' ${node_args} --output-events '${RUN_DIR}/${mode}/raw/migration_events.jsonl' --interval-seconds '${MIGRATION_SAMPLE_INTERVAL_SECONDS:-0.05}' --duration-seconds '${MEASUREMENT_DURATION_SECONDS:-7200}' --api-key-env ADMIN_API_KEY > '${RUN_DIR}/${mode}/logs/migration_sampler.log' 2>&1 < /dev/null & echo \$! > '${RUN_DIR}/${mode}/pids/migration_sampler.pid'"
 }
 
-wait_component() {
-  local mode="$1" component="$2" output="$3" host="${SSH_HOSTS[0]}"
-  ssh "${host}" "for attempt in \$(seq 1 ${COMPONENT_WAIT_ATTEMPTS:-3600}); do pid=\$(cat '${RUN_DIR}/${mode}/pids/${component}.pid'); if ! kill -0 \"\$pid\" 2>/dev/null; then test -s '${output}' && exit 0; exit 1; fi; sleep 1; done; exit 1"
+start_observer_container() {
+  local mode="$1" ledger="$2" host="${SSH_HOSTS[0]}" name
+  name="$(helper_name "${mode}" observer)"
+  ssh "${host}" "docker run -d --name '${name}' --network host -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && exec env PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_slo_observer.py --ledger '${ledger}' --journal '${RUN_DIR}/${mode}/observer/snapshots.jsonl' --summary '${RUN_DIR}/${mode}/observer/summary.json' --window-seconds '${SLO_WINDOW_SECONDS}' --enter-threshold '${SLO_ENTER_THRESHOLD}' --recover-threshold '${SLO_RECOVER_THRESHOLD}' --min-ttft-samples '${MIN_TTFT_SAMPLES}' --min-tpot-intervals '${MIN_TPOT_INTERVALS}' --poll-interval '${CONTROLLER_POLL_SECONDS}' --expected-requests '${TRACE_REQUESTS}'\" >/dev/null"
+}
+
+start_controller_container() {
+  local mode="$1" ledger="$2" host="${SSH_HOSTS[0]}" name
+  name="$(helper_name "${mode}" controller)"
+  ssh "${host}" "docker run -d --name '${name}' --network host --env ADMIN_API_KEY='${ADMIN_API_KEY}' -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && exec env PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_controller.py --router-url 'http://127.0.0.1:${ROUTER_PORT}' --node 'name=node0,worker_url=http://${NODE_IPS[0]}:${PORT},router_worker_id=http://${NODE_IPS[0]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node1,worker_url=http://${NODE_IPS[1]}:${PORT},router_worker_id=http://${NODE_IPS[1]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node2,worker_url=http://${NODE_IPS[2]}:${PORT},router_worker_id=http://${NODE_IPS[2]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node3,worker_url=http://${NODE_IPS[3]}:${PORT},router_worker_id=http://${NODE_IPS[3]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --api-key-env ADMIN_API_KEY --first-migration-ratio '${PD_FLIP_FIRST_MIGRATION_RATIO}' --observation-seconds '${PD_FLIP_OBSERVATION_SECONDS}' --slo-threshold '${SLO_ENTER_THRESHOLD}' --slo-recovery-threshold '${SLO_RECOVER_THRESHOLD}' --force-second-migration-after-observation --min-prefill-slo-samples '${MIN_TTFT_SAMPLES}' --min-decode-slo-samples '${MIN_TPOT_INTERVALS}' monitor-progressive --trace-slo-ledger '${ledger}' --window-seconds '${SLO_WINDOW_SECONDS}' --source-name node2 --migration-target-name node3 --iterations '${PD_FLIP_MONITOR_ITERATIONS:-2400}' --poll-interval '${CONTROLLER_POLL_SECONDS}' > '${RUN_DIR}/${mode}/controller/result.json' 2> '${RUN_DIR}/${mode}/logs/controller.log'\" >/dev/null"
+}
+
+wait_helper_container() {
+  local mode="$1" component="$2" output="$3" host="${SSH_HOSTS[0]}" name
+  name="$(helper_name "${mode}" "${component}")"
+  ssh "${host}" "status=\$(docker wait '${name}'); docker logs --timestamps '${name}' >> '${RUN_DIR}/${mode}/logs/${component}.log' 2>&1 || true; result=1; if test \"\$status\" = 0 && test -s '${output}'; then result=0; fi; docker rm '${name}' >/dev/null; exit \"\$result\""
 }
 
 stop_sampler() {
@@ -278,16 +301,16 @@ finalize_controller_contract() {
 run_workload() {
   local mode="$1" host="${SSH_HOSTS[0]}" ledger="${RUN_DIR}/${mode}/raw/slo_ledger.jsonl"
   start_sampler "${mode}"
-  ssh "${host}" "cd '${SGLANG_REPO}'; nohup python3 scripts/playground/disaggregation/pd_flip_slo_observer.py --ledger '${ledger}' --journal '${RUN_DIR}/${mode}/observer/snapshots.jsonl' --summary '${RUN_DIR}/${mode}/observer/summary.json' --window-seconds '${SLO_WINDOW_SECONDS}' --enter-threshold '${SLO_ENTER_THRESHOLD}' --recover-threshold '${SLO_RECOVER_THRESHOLD}' --min-ttft-samples '${MIN_TTFT_SAMPLES}' --min-tpot-intervals '${MIN_TPOT_INTERVALS}' --poll-interval '${CONTROLLER_POLL_SECONDS}' --expected-requests '${TRACE_REQUESTS}' > '${RUN_DIR}/${mode}/logs/observer.log' 2>&1 < /dev/null & echo \$! > '${RUN_DIR}/${mode}/pids/observer.pid'"
+  start_observer_container "${mode}" "${ledger}"
   if [[ "${mode}" == "state_machine" ]]; then
-    ssh "${host}" "cd '${SGLANG_REPO}'; nohup env ADMIN_API_KEY='${ADMIN_API_KEY}' python3 scripts/playground/disaggregation/pd_flip_controller.py --router-url 'http://127.0.0.1:${ROUTER_PORT}' --node 'name=node0,worker_url=http://${NODE_IPS[0]}:${PORT},router_worker_id=http://${NODE_IPS[0]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node1,worker_url=http://${NODE_IPS[1]}:${PORT},router_worker_id=http://${NODE_IPS[1]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node2,worker_url=http://${NODE_IPS[2]}:${PORT},router_worker_id=http://${NODE_IPS[2]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node3,worker_url=http://${NODE_IPS[3]}:${PORT},router_worker_id=http://${NODE_IPS[3]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --api-key-env ADMIN_API_KEY --first-migration-ratio '${PD_FLIP_FIRST_MIGRATION_RATIO}' --observation-seconds '${PD_FLIP_OBSERVATION_SECONDS}' --slo-threshold '${SLO_ENTER_THRESHOLD}' --slo-recovery-threshold '${SLO_RECOVER_THRESHOLD}' --force-second-migration-after-observation --min-prefill-slo-samples '${MIN_TTFT_SAMPLES}' --min-decode-slo-samples '${MIN_TPOT_INTERVALS}' monitor-progressive --trace-slo-ledger '${ledger}' --window-seconds '${SLO_WINDOW_SECONDS}' --source-name node2 --migration-target-name node3 --iterations '${PD_FLIP_MONITOR_ITERATIONS:-2400}' --poll-interval '${CONTROLLER_POLL_SECONDS}' > '${RUN_DIR}/${mode}/controller/result.json' 2> '${RUN_DIR}/${mode}/logs/controller.log' < /dev/null & echo \$! > '${RUN_DIR}/${mode}/pids/controller.pid'"
+    start_controller_container "${mode}" "${ledger}"
   fi
   ssh "${host}" "cd '${SGLANG_REPO}' && python3 scripts/playground/disaggregation/pd_flip_trace_replay.py replay --trace-jsonl '${RUN_DIR}/trace/trace.jsonl' --router-url 'http://127.0.0.1:${ROUTER_PORT}' --mode '${mode}' --output-dir '${RUN_DIR}/${mode}/raw' --ledger-path '${ledger}' --timeout-seconds '${WORKLOAD_TIMEOUT_SECONDS:-7200}' --max-workers 40"
   ssh "${host}" "cp '${RUN_DIR}/${mode}/raw/${mode}/request_metrics.jsonl' '${RUN_DIR}/${mode}/raw/request_metrics.jsonl'"
   validate_workload "${mode}"
-  wait_component "${mode}" observer "${RUN_DIR}/${mode}/observer/summary.json"
+  wait_helper_container "${mode}" observer "${RUN_DIR}/${mode}/observer/summary.json"
   if [[ "${mode}" == "state_machine" ]]; then
-    wait_component "${mode}" controller "${RUN_DIR}/${mode}/controller/result.json"
+    wait_helper_container "${mode}" controller "${RUN_DIR}/${mode}/controller/result.json"
     finalize_controller_contract
   fi
   stop_sampler "${mode}"
@@ -311,7 +334,7 @@ collect_and_stop() {
 run_one_mode() {
   local mode="$1"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    dry_note "${mode//_/-} sequential workers, health gates, router, observer/controller, replay, graceful stop"
+    dry_note "${mode//_/-} parallel workers, health gates, router, observer/controller, replay, graceful stop"
     return
   fi
   ACTIVE_MODE="${mode}"

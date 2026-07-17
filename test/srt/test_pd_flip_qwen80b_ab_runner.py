@@ -124,7 +124,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             body,
         )
 
-    def test_measurement_helpers_detach_before_trace_replay(self):
+    def test_measurement_helpers_use_experiment_image_before_trace_replay(self):
         source = RUNNER.read_text(encoding="utf-8")
         start = source.index("start_sampler()")
         end = source.index("\n}\n\nvalidate_workload", start)
@@ -135,9 +135,29 @@ class Qwen80BABRunnerTest(unittest.TestCase):
 
         self.assertIn("cd '${SGLANG_REPO}'; nohup env", sampler_body)
         self.assertNotIn("cd '${SGLANG_REPO}' && nohup env", sampler_body)
-        self.assertIn("cd '${SGLANG_REPO}'; nohup python3", workload_body)
-        self.assertIn("cd '${SGLANG_REPO}'; nohup env", workload_body)
-        self.assertNotIn("cd '${SGLANG_REPO}' && nohup", workload_body)
+        self.assertIn("start_observer_container", workload_body)
+        self.assertIn("start_controller_container", workload_body)
+        self.assertNotIn("nohup python3", workload_body)
+
+        observer_start = source.index("start_observer_container()")
+        observer_end = source.index("\n}\n\nstart_controller_container", observer_start)
+        observer_body = source[observer_start:observer_end]
+        controller_start = source.index("start_controller_container()")
+        controller_end = source.index("\n}\n\nwait_helper_container", controller_start)
+        controller_body = source[controller_start:controller_end]
+
+        for body in (observer_body, controller_body):
+            self.assertIn("docker run -d --name", body)
+            self.assertIn("--network host", body)
+            self.assertIn("'${IMAGE}'", body)
+            self.assertIn("/sgl-workspace/sglang", body)
+
+    def test_helper_containers_have_exact_owned_names_and_cleanup(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("helper_name()", source)
+        self.assertIn("docker wait", source)
+        self.assertIn("docker rm -f", source)
+        self.assertNotIn("pd_flip_slo_observer.py'; do", source)
 
     def test_worker_supports_explicit_gpu_and_feature_gates(self):
         source = WORKER.read_text(encoding="utf-8")
