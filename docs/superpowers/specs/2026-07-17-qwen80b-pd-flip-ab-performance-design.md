@@ -81,6 +81,12 @@ When the state-machine run triggers:
 6. the source changes role from Decode to Prefill and the router publishes the
    final `2P2D` topology.
 
+For this fixed-topology A/B experiment, the controller explicitly forces the
+second migration batch after the 3-second observation. The 95% recovery
+threshold remains recorded as an observation metric; it does not cancel the
+required remaining batch. The controller's default behavior outside this
+experiment remains unchanged.
+
 ## Frozen Trace
 
 The runner generates one immutable trace and reuses it for both runs.
@@ -161,8 +167,11 @@ The report includes:
 3. average-TPOT request attainment; and
 4. joint request attainment, requiring both TTFT and average TPOT to pass.
 
-The baseline also runs the same external, read-only SLO observer. It records the
-time at which a state machine would have triggered but performs no mutation.
+Both modes run the same external, read-only SLO observer. It records the
+trigger request, threshold-crossing timestamp, poll-detection timestamp, and
+poll lag but performs no mutation. The state-machine controller additionally
+stores its own exact trigger evidence; the report uses controller evidence as
+authoritative and the observer as an independent check.
 This permits aligned pre-trigger and post-trigger slices without adding state
 machine logic to the baseline workers.
 
