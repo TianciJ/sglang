@@ -141,7 +141,7 @@ prepare() {
   require_secret
   local host="${SSH_HOSTS[0]}"
   ssh "${host}" "mkdir -p '${RUN_DIR}/trace' '${RUN_DIR}/comparison'; for mode in baseline state_machine; do for part in raw logs metrics observer controller pids status; do mkdir -p '${RUN_DIR}/'\$mode/\$part; done; done"
-  ssh "${host}" "docker run --rm --network none -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python python3 scripts/playground/disaggregation/pd_flip_qwen80b_trace.py --run-nonce '${RUN_ID}' --model '${MODEL_ID}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --max-tokens '${TRACE_MAX_TOKENS}' --output '${RUN_DIR}/trace/trace.jsonl' --manifest '${RUN_DIR}/trace/manifest.json'\""
+  ssh "${host}" "docker run --rm --network none -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_qwen80b_trace.py --run-nonce '${RUN_ID}' --model '${MODEL_ID}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --max-tokens '${TRACE_MAX_TOKENS}' --output '${RUN_DIR}/trace/trace.jsonl' --manifest '${RUN_DIR}/trace/manifest.json'\""
   ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/trace/trace.jsonl'; rows=[json.loads(x) for x in open(p) if x.strip()]; assert len(rows)==${TRACE_REQUESTS}; assert all(r['body']['max_tokens']==${TRACE_MAX_TOKENS} for r in rows)\""
 }
 

@@ -70,6 +70,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("ENABLE_REQUEST_TIME_STATS_LOGGING=1", source)
         self.assertIn("pd_flip_slo_observer.py", source)
         self.assertIn("pd_flip_req_timing.py", source)
+        self.assertIn("PYTHONPATH=python:.", source)
         self.assertIn("pd_flip_migration_measure.py", source)
         self.assertIn("monitor-progressive", source)
         self.assertIn("--first-migration-ratio", source)
