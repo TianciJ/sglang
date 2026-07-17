@@ -97,7 +97,9 @@ class TestPDFlipActiveDecodeHandoff(unittest.TestCase):
         root_node = object()
         scheduler = types.SimpleNamespace(
             waiting_queue=[],
-            tree_cache=types.SimpleNamespace(root_node=root_node),
+            tree_cache=types.SimpleNamespace(
+                root_node=root_node, is_chunk_cache=lambda: False
+            ),
             _pd_flip_note_timing=lambda *_args: None,
         )
         scheduler._pd_flip_prepare_target_request_for_adoption = (
@@ -111,6 +113,19 @@ class TestPDFlipActiveDecodeHandoff(unittest.TestCase):
         self.assertEqual(req.cache_protected_len, 0)
         self.assertEqual(req.prefix_indices, [])
         self.assertIs(req.last_node, root_node)
+
+    def test_adopt_keeps_none_last_node_for_chunk_cache(self):
+        prepare = _load_scheduler_method(
+            "_pd_flip_prepare_target_request_for_adoption"
+        )
+        req = types.SimpleNamespace(last_node=None)
+        chunk_cache = types.SimpleNamespace(is_chunk_cache=lambda: True)
+        scheduler = types.SimpleNamespace(tree_cache=chunk_cache)
+
+        prepare(scheduler, req)
+
+        self.assertIsNone(req.last_node)
+        self.assertTrue(req.pd_flip_prebuilt_kv_ready)
 
     def test_scheduler_declares_two_phase_target_commit_and_abort(self):
         scheduler = (REPO_ROOT / "python/sglang/srt/managers/scheduler.py").read_text()

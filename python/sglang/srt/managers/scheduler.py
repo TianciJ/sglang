@@ -6567,12 +6567,14 @@ class Scheduler(
         # causing migrated KV indices to be mistaken for cache-owned indices at
         # final release.  Let the prebuilt admission path initialize the input
         # once while explicitly preserving the received KV ownership.
-        if req.last_node is None:
+        if req.last_node is None and not self.tree_cache.is_chunk_cache():
             # Full-source fallback deliberately uses a zero-length target
             # prefix, so it has no radix match/lock.  The unfinished-cache path
             # still expects a valid lock owner; the root is the canonical
             # zero-prefix owner and dec_lock_ref(root) is a no-op.
             req.last_node = self.tree_cache.root_node
+        # ChunkCache deliberately has no radix root. Its unfinished-request and
+        # lock-ref methods accept a None last_node, so preserve that sentinel.
         req.pd_flip_prebuilt_kv_ready = True
 
     def _pd_flip_adopt_target_request(self, entry: Dict[str, Any]) -> None:
