@@ -166,6 +166,10 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn('gpu_request="\\"device=${gpu_request}\\""', source)
         self.assertIn('CUDA_VISIBLE_DEVICES=${GPU_IDS}', source)
         self.assertIn('MC_GID_INDEX', source)
+        self.assertIn(
+            'extra_docker_args+=(-e "ADMIN_API_KEY=${ADMIN_API_KEY}")', source
+        )
+        self.assertNotIn('extra_docker_args+=(-e ADMIN_API_KEY)', source)
         self.assertIn('ENABLE_REQUEST_TIME_STATS_LOGGING:-0', source)
         self.assertIn('--served-model-name "${MODEL_ID}"', source)
 
