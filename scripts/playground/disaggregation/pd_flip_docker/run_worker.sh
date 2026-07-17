@@ -95,7 +95,8 @@ for name in \
   MOONCAKE_TE_META_DATA_SERVER \
   MOONCAKE_GLOBAL_SEGMENT_SIZE \
   MOONCAKE_PROTOCOL \
-  MOONCAKE_DEVICE; do
+  MOONCAKE_DEVICE \
+  MC_GID_INDEX; do
   if [[ -n "${!name:-}" && "${EXTRA_DOCKER_ARGS:-}" != *"${name}"* ]]; then
     extra_docker_args+=(-e "${name}=${!name}")
   fi

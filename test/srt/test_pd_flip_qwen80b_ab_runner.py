@@ -42,6 +42,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             "MODEL_PATH=/models/Qwen3-Next-80B-A3B-Instruct",
             "TP_SIZE=4",
             "DP_SIZE=1",
+            "MC_GID_INDEX=3",
             "TRACE_REQUESTS=40",
             "TRACE_MAX_TOKENS=10000",
             "TRACE_INTRA_WAVE_INTERVAL_SECONDS=0.5",
@@ -144,6 +145,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn('GPU_IDS:-all', source)
         self.assertIn('gpu_request="\\"device=${gpu_request}\\""', source)
         self.assertIn('CUDA_VISIBLE_DEVICES=${GPU_IDS}', source)
+        self.assertIn('MC_GID_INDEX', source)
         self.assertIn('ENABLE_REQUEST_TIME_STATS_LOGGING:-0', source)
         self.assertIn('--served-model-name "${MODEL_ID}"', source)
 
