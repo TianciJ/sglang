@@ -71,6 +71,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("pd_flip_slo_observer.py", source)
         self.assertIn("pd_flip_req_timing.py", source)
         self.assertIn("PYTHONPATH=python:.", source)
+        self.assertIn("printf -v extra_sglang_args_quoted '%q'", source)
         self.assertIn("pd_flip_migration_measure.py", source)
         self.assertIn("monitor-progressive", source)
         self.assertIn("--first-migration-ratio", source)

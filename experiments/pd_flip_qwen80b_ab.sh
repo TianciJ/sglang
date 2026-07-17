@@ -151,7 +151,8 @@ write_remote_env() {
   local node1="http://${NODE_IPS[1]}:${PORT}"
   local node2="http://${NODE_IPS[2]}:${PORT}"
   local node3="http://${NODE_IPS[3]}:${PORT}"
-  local content
+  local content extra_sglang_args_quoted
+  printf -v extra_sglang_args_quoted '%q' "${EXTRA_SGLANG_ARGS:---trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics}"
   content="ADMIN_API_KEY=${ADMIN_API_KEY}
 IMAGE=${IMAGE}
 SGLANG_REPO=${SGLANG_REPO}
@@ -172,7 +173,7 @@ ENABLE_REQUEST_TIME_STATS_LOGGING=1
 ENABLE_PD_FLIP_HICACHE_STITCH=0
 ENABLE_PD_FLIP_PREFILL_DONOR=0
 ${flags}
-EXTRA_SGLANG_ARGS=${EXTRA_SGLANG_ARGS:---trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics}
+EXTRA_SGLANG_ARGS=${extra_sglang_args_quoted}
 NODE0=${node0}
 NODE1=${node1}
 NODE2=${node2}
