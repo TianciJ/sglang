@@ -5,6 +5,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${ENV_FILE:-${SCRIPT_DIR}/pd_upstream_qwen80b_baseline.env.example}"
 
+if [[ -n "${ADMIN_API_KEY_FILE:-}" ]]; then
+  [[ -r "${ADMIN_API_KEY_FILE}" ]] || { echo "ADMIN_API_KEY_FILE is not readable" >&2; exit 2; }
+  ADMIN_API_KEY="$(tr -d '\r\n' < "${ADMIN_API_KEY_FILE}")"
+  ADMIN_API_KEY="${ADMIN_API_KEY#ADMIN_API_KEY=}"
+fi
+
 IMAGE="tiancij/sglang-upstream:v0.5.15-clean"
 EXPECTED_IMAGE_ID="sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e"
 TRACE_SHA256="82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964"

@@ -120,6 +120,7 @@ def test_exposes_complete_lifecycle_and_evidence_inventory():
 def test_env_example_contains_no_real_secret_and_fixed_topology():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "ADMIN_API_KEY=replace-with-a-private-secret" in text
+    assert "ADMIN_API_KEY_FILE=" in text
     assert "GPU_IDS=0,1,2,3" in text
     assert "TP_SIZE=4" in text
     assert "DP_SIZE=1" in text
@@ -130,6 +131,13 @@ def test_env_example_contains_no_real_secret_and_fixed_topology():
     assert "MC_GID_INDEX=3" in text
     for suffix in ("6240", "7b80", "6600", "5f00"):
         assert f"fd03:4514:80:{suffix}::1" in text
+
+
+def test_can_load_admin_key_from_private_file_without_printing_it():
+    text = source()
+    assert 'if [[ -n "${ADMIN_API_KEY_FILE:-}" ]]' in text
+    assert '[[ -r "${ADMIN_API_KEY_FILE}" ]]' in text
+    assert 'ADMIN_API_KEY="${ADMIN_API_KEY#ADMIN_API_KEY=}"' in text
 
 
 def test_passes_validated_ipv6_mooncake_identity_separately_from_http_ip():
