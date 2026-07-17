@@ -21,12 +21,22 @@ def evaluate_slo_decision(
     min_decode_samples: int,
     *,
     observing: bool = False,
+    recover_threshold: Optional[float] = None,
 ) -> ProgressiveDecision:
     if prefill_total < min_prefill_samples or decode_total < min_decode_samples:
         return ProgressiveDecision.INSUFFICIENT_SAMPLES
 
     prefill_ratio = prefill_good / prefill_total
     decode_ratio = decode_good / decode_total
+    if observing and recover_threshold is not None:
+        if (
+            prefill_ratio >= recover_threshold
+            and decode_ratio >= recover_threshold
+        ):
+            return ProgressiveDecision.RECOVER
+        if prefill_ratio < recover_threshold and decode_ratio >= threshold:
+            return ProgressiveDecision.COMMIT
+        return ProgressiveDecision.RECOVER
     if prefill_ratio < threshold and decode_ratio >= threshold:
         return ProgressiveDecision.COMMIT if observing else ProgressiveDecision.START
     return ProgressiveDecision.RECOVER

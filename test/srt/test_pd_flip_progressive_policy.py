@@ -46,6 +46,38 @@ def test_slo_decision_requires_prefill_risk_and_decode_headroom():
     )
 
 
+def test_observation_uses_a_separate_95_percent_recovery_threshold():
+    m = load_policy_module()
+    assert (
+        m.evaluate_slo_decision(
+            18,
+            20,
+            20,
+            20,
+            0.9,
+            20,
+            20,
+            observing=True,
+            recover_threshold=0.95,
+        )
+        is m.ProgressiveDecision.COMMIT
+    )
+    assert (
+        m.evaluate_slo_decision(
+            19,
+            20,
+            19,
+            20,
+            0.9,
+            20,
+            20,
+            observing=True,
+            recover_threshold=0.95,
+        )
+        is m.ProgressiveDecision.RECOVER
+    )
+
+
 def test_ratio_halves_until_first_n_requests_fit():
     m = load_policy_module()
     reqs = [m.RequestCapacity(str(i), 100) for i in range(8)]

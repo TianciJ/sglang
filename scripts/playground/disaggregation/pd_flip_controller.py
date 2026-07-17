@@ -179,6 +179,7 @@ class PDClusterConfig:
     first_migration_ratio: float = 0.5
     observation_seconds: float = 10.0
     slo_threshold: float = 0.9
+    slo_recovery_threshold: float = 0.95
     min_prefill_slo_samples: int = 20
     min_decode_slo_samples: int = 20
     session_journal_path: str = "pd_flip_session.json"
@@ -194,6 +195,10 @@ class PDClusterConfig:
             raise ValueError("observation_seconds must be greater than or equal to 0")
         if not 0 <= self.slo_threshold <= 1:
             raise ValueError("slo_threshold must be between 0 and 1 inclusive")
+        if not self.slo_threshold <= self.slo_recovery_threshold <= 1:
+            raise ValueError(
+                "slo_recovery_threshold must be between slo_threshold and 1 inclusive"
+            )
         if self.min_prefill_slo_samples <= 0:
             raise ValueError("min_prefill_slo_samples must be greater than 0")
         if self.min_decode_slo_samples <= 0:
@@ -235,6 +240,9 @@ class PDClusterConfig:
             first_migration_ratio=float(data.get("first_migration_ratio", 0.5)),
             observation_seconds=float(data.get("observation_seconds", 10.0)),
             slo_threshold=float(data.get("slo_threshold", 0.9)),
+            slo_recovery_threshold=float(
+                data.get("slo_recovery_threshold", 0.95)
+            ),
             min_prefill_slo_samples=int(data.get("min_prefill_slo_samples", 20)),
             min_decode_slo_samples=int(data.get("min_decode_slo_samples", 20)),
             session_journal_path=str(
@@ -2288,6 +2296,7 @@ class PDFlipController:
             self.config.min_prefill_slo_samples,
             self.config.min_decode_slo_samples,
             observing=observing,
+            recover_threshold=self.config.slo_recovery_threshold,
         )
 
     def _source_pending_requests(
@@ -4905,6 +4914,7 @@ def config_from_args(args: argparse.Namespace) -> PDClusterConfig:
         first_migration_ratio=args.first_migration_ratio,
         observation_seconds=args.observation_seconds,
         slo_threshold=args.slo_threshold,
+        slo_recovery_threshold=args.slo_recovery_threshold,
         min_prefill_slo_samples=args.min_prefill_slo_samples,
         min_decode_slo_samples=args.min_decode_slo_samples,
         session_journal_path=args.session_journal_path,
@@ -4943,6 +4953,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--first-migration-ratio", type=float, default=0.5)
     parser.add_argument("--observation-seconds", type=float, default=10.0)
     parser.add_argument("--slo-threshold", type=float, default=0.9)
+    parser.add_argument("--slo-recovery-threshold", type=float, default=0.95)
     parser.add_argument("--min-prefill-slo-samples", type=int, default=20)
     parser.add_argument("--min-decode-slo-samples", type=int, default=20)
     parser.add_argument("--session-journal-path", default="pd_flip_session.json")
@@ -4994,6 +5005,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     progressive.add_argument("--migration-target-name", default=None)
     progressive.add_argument("--iterations", type=int, default=1)
     progressive.add_argument("--poll-interval", type=float, default=1.0)
+    progressive.add_argument("--window-seconds", type=float, default=10.0)
     return parser
 
 
@@ -5067,7 +5079,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "monitor-progressive":
             slo_monitor = TraceSLOMonitor(
                 ledger_path=args.trace_slo_ledger,
-                window_seconds=max(config.observation_seconds, 1.0),
+                window_seconds=args.window_seconds,
                 client=client,
             )
             output = controller.monitor_progressive(
