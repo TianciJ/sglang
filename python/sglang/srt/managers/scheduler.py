@@ -3686,6 +3686,22 @@ class Scheduler(
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
+    def _pd_flip_state_type_names(self) -> List[str]:
+        for queue_name in (
+            "disagg_decode_prealloc_queue",
+            "disagg_prefill_bootstrap_queue",
+        ):
+            queue = getattr(self, queue_name, None)
+            kv_manager = getattr(queue, "kv_manager", None)
+            kv_args = getattr(kv_manager, "kv_args", None)
+            state_types = getattr(kv_args, "state_types", None)
+            if state_types:
+                return [
+                    str(getattr(state_type, "value", state_type)).lower()
+                    for state_type in state_types
+                ]
+        return []
+
     def _pd_flip_kv_layout_metadata(self) -> Dict[str, Any]:
         allocator = getattr(self, "token_to_kv_pool_allocator", None)
         get_kvcache = getattr(allocator, "get_kvcache", None)
@@ -3716,6 +3732,7 @@ class Scheduler(
             "kv_layer_count": getattr(kv_pool, "layer_num", None),
             "kv_per_token_shape": per_token_shape,
             "model_fingerprint": self._pd_flip_model_fingerprint(kv_pool),
+            "state_types": self._pd_flip_state_type_names(),
         }
 
     def _pd_flip_validate_layout(self, manifest: Dict[str, Any]) -> None:
@@ -3742,6 +3759,7 @@ class Scheduler(
             "kv_element_size",
             "kv_layer_count",
             "kv_per_token_shape",
+            "state_types",
         ):
             if key in manifest and manifest.get(key) != local.get(key):
                 raise ValueError(
@@ -6780,6 +6798,20 @@ class Scheduler(
                 base_manifest.get("source_decode_start") or donor_end or 0
             )
             page_size = max(1, int(base_manifest.get("page_size") or 1))
+            state_types = [
+                str(getattr(state_type, "value", state_type)).lower()
+                for state_type in (base_manifest.get("state_types") or [])
+            ]
+            includes_mamba_state = "mamba" in state_types
+            combined_transfer_values = [
+                entry.get("source_transfer_bytes"),
+                entry.get("delta_transfer_bytes"),
+            ]
+            combined_transfer_bytes = sum(
+                int(value)
+                for value in combined_transfer_values
+                if value is not None
+            )
 
             phase_events = []
             for key, mono_value in sorted(timing.items()):
@@ -6865,6 +6897,12 @@ class Scheduler(
                         "target_decode_dp_rank"
                     ),
                     "model_fingerprint": base_manifest.get("model_fingerprint"),
+                    "state_types": state_types,
+                    "includes_mamba_state": includes_mamba_state,
+                    "combined_transfer_bytes": combined_transfer_bytes,
+                    "kv_component_bytes": None,
+                    "mamba_component_bytes": None,
+                    "byte_breakdown_available": False,
                     "page_size": page_size,
                     "phase_events": phase_events,
                     "p_tokens": len(base_manifest.get("origin_input_ids") or []),
@@ -6903,7 +6941,11 @@ class Scheduler(
                     "provenance_mode": (
                         "prefill_donor_and_source_decode"
                         if base_manifest.get("prefill_donor_host")
-                        else "target_hicache_or_source_decode"
+                        else (
+                            "source_decode_full_state"
+                            if state_types
+                            else "target_hicache_or_source_decode"
+                        )
                     ),
                     "stitch_mode": entry.get("stitch_mode"),
                     "original_stitch_mode": entry.get("original_stitch_mode"),
