@@ -77,9 +77,11 @@ def evaluate_slo_window(
 ) -> SLOSnapshot:
     if not 0 <= enter_threshold <= recover_threshold <= 1:
         raise ValueError("thresholds must satisfy 0 <= enter <= recover <= 1")
+    records = list(records)
     rows = _latest_in_window(records, now=now, window_seconds=window_seconds)
+    all_latest = _latest_in_window(records, now=now, window_seconds=0)
 
-    ttft_good = ttft_total = tpot_good = tpot_total = terminal_requests = 0
+    ttft_good = ttft_total = tpot_good = tpot_total = 0
     for row in rows:
         ttft = row.get("ttft_seconds")
         ttft_slo = row.get("ttft_slo_seconds")
@@ -92,7 +94,9 @@ def evaluate_slo_window(
             tpot_total += interval_total
             if isinstance(interval_good, int):
                 tpot_good += max(0, min(interval_good, interval_total))
-        terminal_requests += int(row.get("status") not in (None, "running"))
+    terminal_requests = sum(
+        int(row.get("status") not in (None, "running")) for row in all_latest
+    )
 
     ttft_attainment = ttft_good / ttft_total if ttft_total else None
     tpot_attainment = tpot_good / tpot_total if tpot_total else None
@@ -186,7 +190,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    first_trigger: SLOSnapshot | None = None
+    first_trigger = next(
+        (
+            row
+            for row in _load_records(args.journal)
+            if row.get("decision") == "enter"
+        ),
+        None,
+    )
     while True:
         now = time.monotonic()
         snapshot = observe_once(
@@ -200,14 +211,14 @@ def main() -> int:
             min_tpot_intervals=args.min_tpot_intervals,
         )
         if snapshot.decision == "enter" and first_trigger is None:
-            first_trigger = snapshot
+            first_trigger = asdict(snapshot)
         if snapshot.terminal_requests >= args.expected_requests:
             break
         time.sleep(max(0.01, args.poll_interval))
 
     summary = {
         "final": asdict(snapshot),
-        "first_trigger": asdict(first_trigger) if first_trigger is not None else None,
+        "first_trigger": first_trigger,
         "observer_only": True,
     }
     args.summary.parent.mkdir(parents=True, exist_ok=True)

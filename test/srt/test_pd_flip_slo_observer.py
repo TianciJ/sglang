@@ -83,6 +83,28 @@ class SLOObserverTest(unittest.TestCase):
         self.assertEqual(snapshot.ttft_good, 9)
         self.assertEqual(snapshot.tpot_good, 95)
 
+    def test_terminal_request_count_is_global_not_window_limited(self):
+        from scripts.playground.disaggregation.pd_flip_slo_observer import (
+            evaluate_slo_window,
+        )
+
+        rows = [
+            _record(i, event_time=100 + i, ttft_good=True, tpot_good=10, terminal=True)
+            for i in range(40)
+        ]
+        snapshot = evaluate_slo_window(
+            rows,
+            now=1000,
+            window_seconds=10,
+            enter_threshold=0.90,
+            recover_threshold=0.95,
+            min_ttft_samples=10,
+            min_tpot_intervals=100,
+        )
+
+        self.assertEqual(snapshot.ttft_total, 0)
+        self.assertEqual(snapshot.terminal_requests, 40)
+
     def test_observer_writes_snapshots_without_mutation_interfaces(self):
         from scripts.playground.disaggregation.pd_flip_slo_observer import (
             observe_once,
