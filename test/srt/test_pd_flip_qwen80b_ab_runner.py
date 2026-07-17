@@ -117,6 +117,21 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("cd '${SGLANG_REPO}'; nohup env", body)
         self.assertNotIn("cd '${SGLANG_REPO}' && nohup env", body)
 
+    def test_measurement_helpers_detach_before_trace_replay(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        start = source.index("start_sampler()")
+        end = source.index("\n}\n\nvalidate_workload", start)
+        sampler_body = source[start:end]
+        start = source.index("run_workload()")
+        end = source.index("\n}\n\ncollect_and_stop", start)
+        workload_body = source[start:end]
+
+        self.assertIn("cd '${SGLANG_REPO}'; nohup env", sampler_body)
+        self.assertNotIn("cd '${SGLANG_REPO}' && nohup env", sampler_body)
+        self.assertIn("cd '${SGLANG_REPO}'; nohup python3", workload_body)
+        self.assertIn("cd '${SGLANG_REPO}'; nohup env", workload_body)
+        self.assertNotIn("cd '${SGLANG_REPO}' && nohup", workload_body)
+
     def test_worker_supports_explicit_gpu_and_feature_gates(self):
         source = WORKER.read_text(encoding="utf-8")
         self.assertIn('ENABLE_DP_ATTENTION:-1', source)
