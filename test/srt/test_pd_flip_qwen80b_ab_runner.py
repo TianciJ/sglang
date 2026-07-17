@@ -108,6 +108,15 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("http://${worker_ip}:${PORT}/health", body)
         self.assertNotIn("http://127.0.0.1:${PORT}/health", body)
 
+    def test_worker_launch_detaches_before_waiting_for_health(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        start = source.index("start_mode()")
+        end = source.index("\n}\n\nstart_sampler", start)
+        body = source[start:end]
+
+        self.assertIn("cd '${SGLANG_REPO}'; nohup env", body)
+        self.assertNotIn("cd '${SGLANG_REPO}' && nohup env", body)
+
     def test_worker_supports_explicit_gpu_and_feature_gates(self):
         source = WORKER.read_text(encoding="utf-8")
         self.assertIn('ENABLE_DP_ATTENTION:-1', source)

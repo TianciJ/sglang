@@ -226,10 +226,10 @@ ENABLE_PD_RUNTIME_ROLE_SWITCH=1"
   for index in 0 1 2 3; do
     local host="${SSH_HOSTS[$index]}"
     write_remote_env "${host}" "${mode}" "${index}" "${flags}"
-    ssh "${host}" "cd '${SGLANG_REPO}' && nohup env ENV_FILE='${RUN_DIR}/${mode}/node${index}.env' scripts/playground/disaggregation/pd_flip_docker/run_worker.sh '${ROLES[$index]}' '${NODE_IPS[$index]}' > '${RUN_DIR}/${mode}/logs/node${index}.log' 2>&1 < /dev/null &"
+    ssh "${host}" "cd '${SGLANG_REPO}'; nohup env ENV_FILE='${RUN_DIR}/${mode}/node${index}.env' scripts/playground/disaggregation/pd_flip_docker/run_worker.sh '${ROLES[$index]}' '${NODE_IPS[$index]}' > '${RUN_DIR}/${mode}/logs/node${index}.log' 2>&1 < /dev/null &"
     wait_worker "${host}" "${ROLES[$index]}" "${mode}" "${index}"
   done
-  ssh "${SSH_HOSTS[0]}" "cd '${SGLANG_REPO}' && nohup env ENV_FILE='${RUN_DIR}/${mode}/node0.env' scripts/playground/disaggregation/pd_flip_docker/run_router.sh > '${RUN_DIR}/${mode}/logs/router.log' 2>&1 < /dev/null &"
+  ssh "${SSH_HOSTS[0]}" "cd '${SGLANG_REPO}'; nohup env ENV_FILE='${RUN_DIR}/${mode}/node0.env' scripts/playground/disaggregation/pd_flip_docker/run_router.sh > '${RUN_DIR}/${mode}/logs/router.log' 2>&1 < /dev/null &"
   ssh "${SSH_HOSTS[0]}" "for attempt in \$(seq 1 300); do curl -fsS 'http://127.0.0.1:${ROUTER_PORT}/v1/models' >/dev/null && exit 0; sleep 1; done; exit 1"
   write_mode_manifest "${mode}"
 }
