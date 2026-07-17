@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-17",
+  "image": {
+    "name": "tiancij/sglang-upstream:v0.5.15-clean",
+    "image_id": "sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e",
+    "owner": "tiancij",
+    "purpose": "clean-upstream-performance-baseline"
+  },
+  "base": {
+    "official_tag": "lmsysorg/sglang:v0.5.15",
+    "image_id": "sha256:06e0aa8359f56ab7a316b60900e6d0dff9bfbb4190d9ce1f5c8caa27e875ae2f",
+    "repo_digest": "sha256:655d004115e384b56b73ad6869bb04b29cce7ba3e597ce8f92eeeb49e2acb0af",
+    "sglang_commit": "f63458b5beaceabbd9d749b9fc956370e1b649e6"
+  },
+  "build": {
+    "dockerfile": "experiments/sglang_upstream_v0.5.15_clean.Dockerfile",
+    "temporary_base_tag_removed": true,
+    "modified_upstream_files": false
+  },
+  "archive": {
+    "filename": "tiancij-sglang-upstream-v0.5.15-clean.tar.zst",
+    "bytes": 11926826781,
+    "sha256": "4ec34de8bf063caa416de0e192df4144f75c7c877f113a4d0a43d554dc7af3d3"
+  },
+  "installed_nodes": [
+    "cloud-099",
+    "cloud-100",
+    "cloud-101",
+    "cloud-102"
+  ],
+  "runtime_constraint": "Do not mount the modified SGLang repository over /sgl-workspace/sglang when using this clean upstream image."
+}
