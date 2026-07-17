@@ -227,6 +227,9 @@ ENABLE_PD_RUNTIME_ROLE_SWITCH=1"
     local host="${SSH_HOSTS[$index]}"
     write_remote_env "${host}" "${mode}" "${index}" "${flags}"
     ssh "${host}" "cd '${SGLANG_REPO}'; nohup env ENV_FILE='${RUN_DIR}/${mode}/node${index}.env' scripts/playground/disaggregation/pd_flip_docker/run_worker.sh '${ROLES[$index]}' '${NODE_IPS[$index]}' > '${RUN_DIR}/${mode}/logs/node${index}.log' 2>&1 < /dev/null &"
+  done
+  for index in 0 1 2 3; do
+    host="${SSH_HOSTS[$index]}"
     wait_worker "${host}" "${ROLES[$index]}" "${mode}" "${index}"
   done
   ssh "${SSH_HOSTS[0]}" "cd '${SGLANG_REPO}'; nohup env ENV_FILE='${RUN_DIR}/${mode}/node0.env' scripts/playground/disaggregation/pd_flip_docker/run_router.sh > '${RUN_DIR}/${mode}/logs/router.log' 2>&1 < /dev/null &"

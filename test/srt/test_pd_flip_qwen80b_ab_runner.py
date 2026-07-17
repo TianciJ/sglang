@@ -116,6 +116,12 @@ class Qwen80BABRunnerTest(unittest.TestCase):
 
         self.assertIn("cd '${SGLANG_REPO}'; nohup env", body)
         self.assertNotIn("cd '${SGLANG_REPO}' && nohup env", body)
+        self.assertEqual(body.count("for index in 0 1 2 3; do"), 2)
+        self.assertLess(body.index("run_worker.sh"), body.index("wait_worker"))
+        self.assertIn(
+            "done\n  for index in 0 1 2 3; do\n    host=\"${SSH_HOSTS[$index]}\"",
+            body,
+        )
 
     def test_measurement_helpers_detach_before_trace_replay(self):
         source = RUNNER.read_text(encoding="utf-8")
