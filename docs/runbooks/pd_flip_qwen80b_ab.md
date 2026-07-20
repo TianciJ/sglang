@@ -47,6 +47,7 @@ The dry run performs no SSH, Docker, file creation, or process mutation:
 
 ```bash
 DRY_RUN=1 \
+ENABLE_CANDIDATE_PREFILL_WARMUP=0 \
 RUN_ID=local-plan-check \
 ENV_FILE=/path/to/private-qwen80b.env \
 bash experiments/pd_flip_qwen80b_ab.sh run
@@ -76,15 +77,74 @@ The sequence is:
 
 1. Preflight the four hosts.
 2. Build one immutable trace offline from the local model tokenizer and record its SHA-256.
-3. Start baseline workers sequentially. Each worker must pass health and role checks before the next starts. Start the router only after all four workers pass.
+3. Start all four baseline workers concurrently. Start the router only after every worker passes its bounded health and role gate.
 4. Start the read-only SLO observer and the 50 ms telemetry sampler, replay all 40 requests, and verify every request completed with exactly 10,000 matching output tokens.
 5. Capture logs, gracefully stop the exact baseline containers, verify ports and GPU driver health, and normalize request-stage evidence.
-6. Load the state-machine configuration through different owned container names and repeat the sequential health gates.
+6. Load the state-machine configuration through different owned container names and repeat the concurrent startup and bounded health gates.
 7. Start telemetry and the progressive controller. On the first eligible TTFT violation, migrate 50%, observe for 2 seconds, and then migrate the remainder according to the configured experiment policy.
 8. Verify the controller completed and the router reports `2P2D`, stop the sampler and owned containers, and normalize all migration evidence.
 9. Validate the pair and generate the comparison report.
 
 If baseline teardown or host-health verification fails, the shell exits before the second model load. Preserve the run directory and diagnose the host instead of retrying with `docker restart`.
+
+## Candidate-P Prefill warmup diagnostic
+
+`ENABLE_CANDIDATE_PREFILL_WARMUP=1` changes the question from a matched A/B
+comparison to a state-machine-only warmup diagnostic. The runner deliberately
+rejects the combined `run` command in this mode. Do not compare its metrics to
+an unmatched baseline as the performance effect of PD Flip.
+
+The diagnostic persists compile/JIT artifacts in a provenance-keyed,
+node-local directory below `COMPILE_CACHE_ROOT`. A matching disk cache reduces
+repeat compilation after a container reload, but every candidate P still runs
+the same long and short Prefill requests inside its own live worker process.
+
+Its no-op command check is:
+
+```bash
+DRY_RUN=1 \
+ENABLE_CANDIDATE_PREFILL_WARMUP=1 \
+RUN_ID=local-candidate-p-warm-check \
+ENV_FILE=/path/to/private-qwen80b.env \
+bash experiments/pd_flip_qwen80b_ab.sh state-machine
+```
+
+Use one `RUN_ID` for all three commands:
+
+```bash
+RUN_ID=20260720T000000Z-qwen80b-candidate-p-warm \
+ENABLE_CANDIDATE_PREFILL_WARMUP=1 \
+ENV_FILE=/path/to/private-qwen80b.env \
+bash experiments/pd_flip_qwen80b_ab.sh preflight
+
+RUN_ID=20260720T000000Z-qwen80b-candidate-p-warm \
+ENABLE_CANDIDATE_PREFILL_WARMUP=1 \
+ENV_FILE=/path/to/private-qwen80b.env \
+bash experiments/pd_flip_qwen80b_ab.sh prepare
+
+RUN_ID=20260720T000000Z-qwen80b-candidate-p-warm \
+ENABLE_CANDIDATE_PREFILL_WARMUP=1 \
+ENV_FILE=/path/to/private-qwen80b.env \
+bash experiments/pd_flip_qwen80b_ab.sh state-machine
+```
+
+After the router is healthy and before any measurement helper starts, node0
+runs the long/short Prefill profile in its initial role. Node1, node2, and
+node3 are then warmed serially by temporarily publishing each as the only
+routable P, running both requests through the complete router-to-P-to-D path,
+and restoring it to D. At least two D workers remain available throughout.
+
+The measured trace is gated on all eight warmups, four successful worker cache
+flushes, empty worker queues, all worker event loops restored to their initial
+roles, and a non-draining router topology of exactly `1P3D`. Observer,
+controller, migration sampling, and the measured ledger start only after this
+gate. A failure preserves the warmup journal and exact run-owned logs and does
+not relaunch the model under the same run ID.
+
+Every worker-role, router-role, and drain transition records a shared action ID
+with full before/after JSON snapshots. Cache snapshots fail closed on unreadable
+directories and retain the complete per-node provenance material needed to
+audit the namespace hash; the mode manifest links both snapshot sets.
 
 ## Artifact layout
 
@@ -107,6 +167,11 @@ baseline/
   metrics/migration/
 state_machine/
   manifest.json
+  warmup/summary.json
+  warmup/warmup_events.jsonl
+  warmup/requests/node{0,1,2,3}-{long,short}.json
+  warmup/status/
+  status/cache-node{0,1,2,3}-{before,after-warmup}.json
   raw/request_metrics.jsonl
   raw/slo_ledger.jsonl
   raw/migration_events.jsonl

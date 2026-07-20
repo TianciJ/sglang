@@ -28,6 +28,12 @@ SLO_RECOVER_THRESHOLD="${SLO_RECOVER_THRESHOLD:-0.95}"
 MIN_TTFT_SAMPLES="${MIN_TTFT_SAMPLES:-10}"
 MIN_TPOT_INTERVALS="${MIN_TPOT_INTERVALS:-100}"
 CONTROLLER_POLL_SECONDS="${CONTROLLER_POLL_SECONDS:-0.25}"
+ENABLE_CANDIDATE_PREFILL_WARMUP="${ENABLE_CANDIDATE_PREFILL_WARMUP:-0}"
+COMPILE_CACHE_ROOT="${COMPILE_CACHE_ROOT:-/home/tiancij/sglang-compile-cache}"
+COMPILE_CACHE_CONTAINER_DIR="${COMPILE_CACHE_CONTAINER_DIR:-/var/cache/sglang-compile}"
+WARMUP_PROFILE_VERSION="${WARMUP_PROFILE_VERSION:-candidate-p-v1-long-short}"
+CACHE_NAMESPACE=""
+CACHE_PROVENANCE_HASH=""
 
 SSH_HOSTS=("${NODE0_SSH:-cloud-099}" "${NODE1_SSH:-cloud-100}" "${NODE2_SSH:-cloud-101}" "${NODE3_SSH:-cloud-102}")
 NODE_IPS=("${NODE0_IP:-192.168.0.42}" "${NODE1_IP:-192.168.0.40}" "${NODE2_IP:-192.168.0.39}" "${NODE3_IP:-192.168.0.41}")
@@ -44,7 +50,16 @@ redacted() {
 
 remote_code_hash() {
   local host="$1"
-  ssh "${host}" "git -C '${SGLANG_REPO}' rev-parse HEAD 2>/dev/null || cat '${SGLANG_REPO}/.git/refs/heads/main'"
+  ssh "${host}" "head=\$(git -C '${SGLANG_REPO}' rev-parse HEAD 2>/dev/null || cat '${SGLANG_REPO}/.git/refs/heads/main'); patch=\$(git -C '${SGLANG_REPO}' diff --binary --no-ext-diff HEAD -- . ':!pd_flip_session.json' | sha256sum | awk '{print \$1}'); untracked=\$(git -C '${SGLANG_REPO}' ls-files --others --exclude-standard -- python scripts experiments | LC_ALL=C sort | while IFS= read -r path; do sha256sum '${SGLANG_REPO}/'\"\$path\"; done | sha256sum | awk '{print \$1}'); printf '%s|%s|%s' \"\$head\" \"\$patch\" \"\$untracked\" | sha256sum | awk '{print \$1}'"
+}
+
+cache_provenance_material() {
+  local host="$1" code_hash model_hash image_id selected_gpus
+  code_hash="$(remote_code_hash "${host}")"
+  model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
+  image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
+  selected_gpus="$(ssh "${host}" "nvidia-smi -i '${GPU_IDS}' --query-gpu=index,name,compute_cap,driver_version --format=csv,noheader | LC_ALL=C sort")"
+  printf '%s' "code=${code_hash}|model=${model_hash}|image=${image_id}|selected_gpus=${selected_gpus}|tp=${TP_SIZE}|dp=${DP_SIZE}|gpu_ids=${GPU_IDS}|mem=${MEM_FRACTION_STATIC:-0.88}|dp_attention=${ENABLE_DP_ATTENTION:-0}|transfer=${TRANSFER_BACKEND:-mooncake}|extra=${EXTRA_SGLANG_ARGS:-}|profile=${WARMUP_PROFILE_VERSION}"
 }
 
 dry_note() {
@@ -87,7 +102,7 @@ on_failure() {
   echo "abnormal exit; gracefully cleaning exact owned resources for ${RUN_ID}/${mode}" >&2
   ssh "${SSH_HOSTS[0]}" "pid_file='${RUN_DIR}/${mode}/pids/migration_sampler.pid'; if test -f \"\$pid_file\"; then pid=\$(cat \"\$pid_file\"); if kill -0 \"\$pid\" 2>/dev/null && tr '\\0' ' ' < /proc/\$pid/cmdline | grep -F 'pd_flip_migration_measure.py sample' >/dev/null; then kill -TERM \"\$pid\"; fi; fi"
   local component helper
-  for component in observer controller; do
+  for component in warmup observer controller; do
     helper="$(helper_name "${mode}" "${component}")"
     ssh "${SSH_HOSTS[0]}" "if docker inspect '${helper}' >/dev/null 2>&1; then docker logs --timestamps '${helper}' >> '${RUN_DIR}/${mode}/logs/${component}.log' 2>&1 || true; docker rm -f '${helper}' >/dev/null; fi"
   done
@@ -150,19 +165,63 @@ prepare() {
   fi
   require_secret
   local host="${SSH_HOSTS[0]}"
-  ssh "${host}" "mkdir -p '${RUN_DIR}/trace' '${RUN_DIR}/comparison'; for mode in baseline state_machine; do for part in raw logs metrics observer controller pids status; do mkdir -p '${RUN_DIR}/'\$mode/\$part; done; done"
+  ssh "${host}" "mkdir -p '${RUN_DIR}/trace' '${RUN_DIR}/comparison'; for mode in baseline state_machine; do for part in raw logs metrics observer controller pids status warmup; do mkdir -p '${RUN_DIR}/'\$mode/\$part; done; done"
+  if [[ "${ENABLE_CANDIDATE_PREFILL_WARMUP}" == "1" ]]; then
+    ensure_cache_namespace
+    for index in 0 1 2 3; do
+      ssh "${SSH_HOSTS[$index]}" "mkdir -p '${COMPILE_CACHE_ROOT}/${CACHE_NAMESPACE}'"
+    done
+  fi
   ssh "${host}" "docker run --rm --network none -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_qwen80b_trace.py --run-nonce '${RUN_ID}' --model '${MODEL_ID}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --max-tokens '${TRACE_MAX_TOKENS}' --output '${RUN_DIR}/trace/trace.jsonl' --manifest '${RUN_DIR}/trace/manifest.json'\""
   ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/trace/trace.jsonl'; rows=[json.loads(x) for x in open(p) if x.strip()]; assert len(rows)==${TRACE_REQUESTS}; assert all(r['body']['max_tokens']==${TRACE_MAX_TOKENS} for r in rows)\""
 }
 
+ensure_cache_namespace() {
+  if [[ -n "${CACHE_NAMESPACE}" ]]; then
+    return
+  fi
+  local index host material current_hash expected_hash=""
+  for index in 0 1 2 3; do
+    host="${SSH_HOSTS[$index]}"
+    material="$(cache_provenance_material "${host}")"
+    current_hash="$(printf '%s' "${material}" | sha256sum | awk '{print $1}')"
+    if [[ -z "${expected_hash}" ]]; then
+      expected_hash="${current_hash}"
+    elif [[ "${current_hash}" != "${expected_hash}" ]]; then
+      echo "compile cache provenance mismatch at ${host}: ${current_hash} != ${expected_hash}" >&2
+      exit 2
+    fi
+  done
+  CACHE_PROVENANCE_HASH="${expected_hash}"
+  CACHE_NAMESPACE="qwen80b-${CACHE_PROVENANCE_HASH:0:24}"
+}
+
+capture_cache_snapshot() {
+  local mode="$1" phase="$2" index host snapshot encoded material material_encoded
+  ensure_cache_namespace
+  for index in 0 1 2 3; do
+    host="${SSH_HOSTS[$index]}"
+    material="$(cache_provenance_material "${host}")"
+    material_encoded="$(printf '%s' "${material}" | base64 | tr -d '\n')"
+    snapshot="$(ssh "${host}" "PROVENANCE_B64='${material_encoded}' python3 -c \"import base64,json,os; root='${COMPILE_CACHE_ROOT}/${CACHE_NAMESPACE}'; os.listdir(root); fail=lambda error: (_ for _ in ()).throw(error); sizes=[os.path.getsize(os.path.join(d,n)) for d,_,fs in os.walk(root,onerror=fail) for n in fs if os.path.isfile(os.path.join(d,n))]; print(json.dumps({'node_index':${index},'phase':'${phase}','cache_namespace':'${CACHE_NAMESPACE}','cache_provenance_hash':'${CACHE_PROVENANCE_HASH}','provenance_material':base64.b64decode(os.environ['PROVENANCE_B64']).decode(),'host_path':root,'file_count':len(sizes),'total_bytes':sum(sizes)},sort_keys=True))\"")"
+    encoded="$(printf '%s\n' "${snapshot}" | base64 | tr -d '\n')"
+    ssh "${SSH_HOSTS[0]}" "printf '%s' '${encoded}' | base64 -d > '${RUN_DIR}/${mode}/status/cache-node${index}-${phase}.json'"
+  done
+}
+
 write_remote_env() {
-  local host="$1" mode="$2" index="$3" flags="$4"
+  local host="$1" mode="$2" index="$3" flags="$4" cache_enabled="$5"
   local node0="http://${NODE_IPS[0]}:${PORT}"
   local node1="http://${NODE_IPS[1]}:${PORT}"
   local node2="http://${NODE_IPS[2]}:${PORT}"
   local node3="http://${NODE_IPS[3]}:${PORT}"
-  local content extra_sglang_args_quoted
+  local content extra_sglang_args_quoted cache_env=""
   printf -v extra_sglang_args_quoted '%q' "${EXTRA_SGLANG_ARGS:---trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics}"
+  if [[ "${cache_enabled}" == "1" ]]; then
+    cache_env="SGLANG_COMPILE_CACHE_HOST_DIR=${COMPILE_CACHE_ROOT}/${CACHE_NAMESPACE}
+SGLANG_COMPILE_CACHE_CONTAINER_DIR=${COMPILE_CACHE_CONTAINER_DIR}
+SGLANG_COMPILE_CACHE_NAMESPACE=${CACHE_NAMESPACE}"
+  fi
   content="ADMIN_API_KEY=${ADMIN_API_KEY}
 IMAGE=${IMAGE}
 SGLANG_REPO=${SGLANG_REPO}
@@ -178,6 +237,7 @@ MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.88}
 GPU_IDS=${GPU_IDS}
 TP_SIZE=${TP_SIZE}
 DP_SIZE=${DP_SIZE}
+${cache_env}
 ENABLE_DP_ATTENTION=${ENABLE_DP_ATTENTION:-0}
 ENABLE_CUSTOM_LOGIT_PROCESSOR=1
 ENABLE_REQUEST_TIME_STATS_LOGGING=1
@@ -208,7 +268,7 @@ wait_worker() {
 }
 
 write_mode_manifest() {
-  local mode="$1" host="${SSH_HOSTS[0]}" topology trace_sha code_hash model_hash image_id content encoded state_enabled role_switch_enabled
+  local mode="$1" host="${SSH_HOSTS[0]}" topology trace_sha code_hash model_hash image_id gpu_model driver_version content encoded state_enabled role_switch_enabled
   topology="1P3D"
   state_enabled=false
   role_switch_enabled=false
@@ -220,13 +280,24 @@ write_mode_manifest() {
   code_hash="$(remote_code_hash "${host}")"
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
   image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
-  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
+  gpu_model="$(ssh "${host}" "nvidia-smi -i '${GPU_IDS%%,*}' --query-gpu=name,compute_cap --format=csv,noheader | head -n1")"
+  driver_version="$(ssh "${host}" "nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1")"
+  local candidate_warmup=false dp_attention_enabled=false cache_snapshot_before=null cache_snapshot_after_warmup=null
+  if [[ "${mode}" == "state_machine" && "${ENABLE_CANDIDATE_PREFILL_WARMUP}" == "1" ]]; then
+    candidate_warmup=true
+    cache_snapshot_before="\"${RUN_DIR}/${mode}/status/cache-node{0,1,2,3}-before.json\""
+    cache_snapshot_after_warmup="\"${RUN_DIR}/${mode}/status/cache-node{0,1,2,3}-after-warmup.json\""
+  fi
+  if [[ "${ENABLE_DP_ATTENTION:-0}" == "1" ]]; then
+    dp_attention_enabled=true
+  fi
+  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
   encoded="$(printf '%s\n' "${content}" | base64 | tr -d '\n')"
   ssh "${host}" "printf '%s' '${encoded}' | base64 -d > '${RUN_DIR}/${mode}/manifest.json'"
 }
 
 start_mode() {
-  local mode="$1" flags
+  local mode="$1" flags cache_enabled="0"
   if [[ "${mode}" == "baseline" ]]; then
     flags="ENABLE_PD_FLIP_STATE_MACHINE=0
 ENABLE_PD_RUNTIME_ROLE_SWITCH=0"
@@ -234,9 +305,17 @@ ENABLE_PD_RUNTIME_ROLE_SWITCH=0"
     flags="ENABLE_PD_FLIP_STATE_MACHINE=1
 ENABLE_PD_RUNTIME_ROLE_SWITCH=1"
   fi
+  if [[ "${mode}" == "state_machine" && "${ENABLE_CANDIDATE_PREFILL_WARMUP}" == "1" ]]; then
+    cache_enabled="1"
+    ensure_cache_namespace
+    capture_cache_snapshot "${mode}" before
+  fi
   for index in 0 1 2 3; do
     local host="${SSH_HOSTS[$index]}"
-    write_remote_env "${host}" "${mode}" "${index}" "${flags}"
+    if [[ "${cache_enabled}" == "1" ]]; then
+      ssh "${host}" "test -d '${COMPILE_CACHE_ROOT}/${CACHE_NAMESPACE}'"
+    fi
+    write_remote_env "${host}" "${mode}" "${index}" "${flags}" "${cache_enabled}"
     ssh "${host}" "cd '${SGLANG_REPO}'; nohup env ENV_FILE='${RUN_DIR}/${mode}/node${index}.env' scripts/playground/disaggregation/pd_flip_docker/run_worker.sh '${ROLES[$index]}' '${NODE_IPS[$index]}' > '${RUN_DIR}/${mode}/logs/node${index}.log' 2>&1 < /dev/null &"
   done
   for index in 0 1 2 3; do
@@ -246,6 +325,25 @@ ENABLE_PD_RUNTIME_ROLE_SWITCH=1"
   ssh "${SSH_HOSTS[0]}" "cd '${SGLANG_REPO}'; nohup env ENV_FILE='${RUN_DIR}/${mode}/node0.env' scripts/playground/disaggregation/pd_flip_docker/run_router.sh > '${RUN_DIR}/${mode}/logs/router.log' 2>&1 < /dev/null &"
   ssh "${SSH_HOSTS[0]}" "for attempt in \$(seq 1 300); do curl -fsS 'http://127.0.0.1:${ROUTER_PORT}/v1/models' >/dev/null && exit 0; sleep 1; done; exit 1"
   write_mode_manifest "${mode}"
+}
+
+warm_candidate_prefill_nodes() {
+  local mode="$1" host="${SSH_HOSTS[0]}" name status
+  name="$(helper_name "${mode}" warmup)"
+  ssh "${host}" "mkdir -p '${RUN_DIR}/${mode}/warmup/requests' '${RUN_DIR}/${mode}/warmup/status'"
+  if ssh "${host}" "docker run --name '${name}' --network host --env-file '${RUN_DIR}/${mode}/node0.env' -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && exec env PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_candidate_prefill_warmup.py --router-url 'http://127.0.0.1:${ROUTER_PORT}' --node 'name=node0,worker_url=http://${NODE_IPS[0]}:${PORT},router_worker_id=http://${NODE_IPS[0]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node1,worker_url=http://${NODE_IPS[1]}:${PORT},router_worker_id=http://${NODE_IPS[1]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node2,worker_url=http://${NODE_IPS[2]}:${PORT},router_worker_id=http://${NODE_IPS[2]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --node 'name=node3,worker_url=http://${NODE_IPS[3]}:${PORT},router_worker_id=http://${NODE_IPS[3]}:${PORT},bootstrap_port=${BOOTSTRAP_PORT}' --initial-prefill-name node0 --candidate-prefill-name node0 --candidate-prefill-name node1 --candidate-prefill-name node2 --candidate-prefill-name node3 --trace-jsonl '${RUN_DIR}/trace/trace.jsonl' --output-dir '${RUN_DIR}/${mode}/warmup' --api-key-env ADMIN_API_KEY --request-timeout-seconds '${WARMUP_REQUEST_TIMEOUT_SECONDS:-900}' --role-timeout-seconds '${WARMUP_ROLE_TIMEOUT_SECONDS:-180}' --role-poll-seconds '${WARMUP_ROLE_POLL_SECONDS:-0.25}'\""; then
+    status=0
+  else
+    status=$?
+  fi
+  ssh "${host}" "docker logs --timestamps '${name}' > '${RUN_DIR}/${mode}/logs/warmup.log' 2>&1 || true"
+  if [[ "${status}" != "0" ]]; then
+    echo "candidate Prefill warmup failed; preserving forensic evidence" >&2
+    return "${status}"
+  fi
+  ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/${mode}/warmup/summary.json'; d=json.load(open(p)); assert d.get('success') is True; assert d.get('warmup_request_count')==8; assert d.get('candidate_names')==['node0','node1','node2','node3']; assert d.get('final_topology')=='1P3D'; assert d.get('kv_cache_flushed_after') is True\""
+  capture_cache_snapshot "${mode}" after-warmup
+  ssh "${host}" "docker rm '${name}' >/dev/null"
 }
 
 start_sampler() {
@@ -339,6 +437,11 @@ run_one_mode() {
   fi
   ACTIVE_MODE="${mode}"
   start_mode "${mode}"
+  if [[ "${mode}" == "state_machine" ]]; then
+    if [[ "${ENABLE_CANDIDATE_PREFILL_WARMUP}" == "1" ]]; then
+      warm_candidate_prefill_nodes "${mode}"
+    fi
+  fi
   run_workload "${mode}"
   collect_and_stop "${mode}"
   ACTIVE_MODE=""
@@ -352,10 +455,20 @@ compare() {
     dry_note "compare raw artifacts and regenerate report"
     return
   fi
+  local diagnostic_modes
+  diagnostic_modes="$(ssh "${SSH_HOSTS[0]}" "python3 -c \"import json, pathlib; root=pathlib.Path('${RUN_DIR}'); print(','.join(mode for mode in ('baseline','state_machine') if json.load(open(root/mode/'manifest.json')).get('candidate_prefill_warmup_enabled') is True))\"")"
+  if [[ -n "${diagnostic_modes}" ]]; then
+    echo "candidate Prefill warmup is a state-machine diagnostic, not an A/B comparison: ${diagnostic_modes}" >&2
+    exit 2
+  fi
   ssh "${SSH_HOSTS[0]}" "cd '${SGLANG_REPO}' && python3 scripts/playground/disaggregation/pd_flip_ab_report.py --run-dir '${RUN_DIR}'"
 }
 
 run_all() {
+  if [[ "${ENABLE_CANDIDATE_PREFILL_WARMUP}" == "1" ]]; then
+    echo "candidate Prefill warmup is a state-machine diagnostic; use the state-machine command instead of run" >&2
+    exit 2
+  fi
   preflight
   prepare
   baseline

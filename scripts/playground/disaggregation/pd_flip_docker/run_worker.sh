@@ -26,6 +26,16 @@ fi
 if [[ -d /dev/infiniband ]]; then
   mounts+=(-v /dev/infiniband:/dev/infiniband)
 fi
+if [[ -n "${SGLANG_COMPILE_CACHE_HOST_DIR:-}" ]]; then
+  if [[ ! -d "${SGLANG_COMPILE_CACHE_HOST_DIR}" ]]; then
+    echo "persistent compile cache directory does not exist: ${SGLANG_COMPILE_CACHE_HOST_DIR}" >&2
+    exit 2
+  fi
+  SGLANG_COMPILE_CACHE_CONTAINER_DIR="${SGLANG_COMPILE_CACHE_CONTAINER_DIR:-/var/cache/sglang-compile}"
+  mounts+=(
+    -v "${SGLANG_COMPILE_CACHE_HOST_DIR}:${SGLANG_COMPILE_CACHE_CONTAINER_DIR}"
+  )
+fi
 
 server_args=(
   python3 -m sglang.launch_server
@@ -89,6 +99,18 @@ launch_cmd="cd /sgl-workspace/sglang && PYTHONPATH=python exec ${server_cmd}--ad
 extra_docker_args=(${EXTRA_DOCKER_ARGS:-})
 if [[ "${EXTRA_DOCKER_ARGS:-}" != *"ADMIN_API_KEY"* ]]; then
   extra_docker_args+=(-e "ADMIN_API_KEY=${ADMIN_API_KEY}")
+fi
+if [[ -n "${SGLANG_COMPILE_CACHE_HOST_DIR:-}" ]]; then
+  cache_root="${SGLANG_COMPILE_CACHE_CONTAINER_DIR}"
+  extra_docker_args+=(
+    -e "SGLANG_CACHE_DIR=${cache_root}/sglang"
+    -e "TORCHINDUCTOR_CACHE_DIR=${cache_root}/torchinductor"
+    -e "TRITON_CACHE_DIR=${cache_root}/triton"
+    -e "CUDA_CACHE_PATH=${cache_root}/cuda"
+    -e "TORCH_EXTENSIONS_DIR=${cache_root}/torch-extensions"
+    -e "TVM_FFI_CACHE_DIR=${cache_root}/tvm-ffi"
+    -e "XDG_CACHE_HOME=${cache_root}/xdg"
+  )
 fi
 for name in \
   MOONCAKE_MASTER \

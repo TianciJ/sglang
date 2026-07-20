@@ -239,6 +239,19 @@ def _validate(
         "prefill_donor_enabled"
     ) is not False:
         errors.append("state machine must disable HiCache stitch and Prefill Donor")
+    if baseline_manifest.get("candidate_prefill_warmup_enabled") is True or state_manifest.get(
+        "candidate_prefill_warmup_enabled"
+    ) is True:
+        errors.append(
+            "candidate Prefill warmup is a state-machine diagnostic, not an A/B mode"
+        )
+    elif (
+        baseline_manifest.get("candidate_prefill_warmup_enabled") is not False
+        or state_manifest.get("candidate_prefill_warmup_enabled") is not False
+    ):
+        errors.append(
+            "both A/B manifests must explicitly disable candidate Prefill warmup"
+        )
     for mode, rows in (("baseline", baseline_rows), ("state_machine", state_rows)):
         if len(rows) != 40:
             errors.append(f"{mode} request count is not 40")

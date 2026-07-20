@@ -11,6 +11,13 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "experiments" / "pd_flip_qwen80b_ab.sh"
 ENV_EXAMPLE = ROOT / "experiments" / "pd_flip_qwen80b_ab.env.example"
 WORKER = ROOT / "scripts/playground/disaggregation/pd_flip_docker/run_worker.sh"
+WARMUP = (
+    ROOT
+    / "scripts"
+    / "playground"
+    / "disaggregation"
+    / "pd_flip_candidate_prefill_warmup.py"
+)
 
 
 def _bash_path(path):
@@ -55,6 +62,8 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             "MIN_TTFT_SAMPLES=10",
             "MIN_TPOT_INTERVALS=100",
             "CONTROLLER_POLL_SECONDS=0.25",
+            "ENABLE_CANDIDATE_PREFILL_WARMUP=0",
+            "COMPILE_CACHE_ROOT=/home/tiancij/sglang-compile-cache",
         ):
             self.assertIn(value, source)
 
@@ -176,6 +185,106 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertNotIn('extra_docker_args+=(-e ADMIN_API_KEY)', source)
         self.assertIn('ENABLE_REQUEST_TIME_STATS_LOGGING:-0', source)
         self.assertIn('--served-model-name "${MODEL_ID}"', source)
+
+    def test_worker_mounts_the_provenance_keyed_persistent_compile_cache(self):
+        source = WORKER.read_text(encoding="utf-8")
+
+        self.assertIn("SGLANG_COMPILE_CACHE_HOST_DIR", source)
+        self.assertIn("SGLANG_COMPILE_CACHE_CONTAINER_DIR", source)
+        self.assertIn('SGLANG_CACHE_DIR=', source)
+        self.assertIn('TORCHINDUCTOR_CACHE_DIR=', source)
+        self.assertIn('TRITON_CACHE_DIR=', source)
+        self.assertIn('CUDA_CACHE_PATH=', source)
+        self.assertIn('TORCH_EXTENSIONS_DIR=', source)
+        self.assertIn('TVM_FFI_CACHE_DIR=', source)
+
+    def test_state_machine_warms_every_candidate_p_before_measurement(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        run_start = source.index("run_one_mode()")
+        run_end = source.index("\n}\n\nbaseline()", run_start)
+        run_body = source[run_start:run_end]
+
+        self.assertIn('if [[ "${mode}" == "state_machine" ]]', run_body)
+        self.assertIn('warm_candidate_prefill_nodes "${mode}"', run_body)
+        self.assertLess(
+            run_body.index('warm_candidate_prefill_nodes "${mode}"'),
+            run_body.index('run_workload "${mode}"'),
+        )
+
+        self.assertIn("pd_flip_candidate_prefill_warmup.py", source)
+        self.assertIn("--candidate-prefill-name node0", source)
+        self.assertIn("--candidate-prefill-name node1", source)
+        self.assertIn("--candidate-prefill-name node2", source)
+        self.assertIn("--candidate-prefill-name node3", source)
+        self.assertIn("--trace-jsonl '${RUN_DIR}/trace/trace.jsonl'", source)
+        self.assertIn("--output-dir '${RUN_DIR}/${mode}/warmup'", source)
+        manifest_start = source.index("write_mode_manifest()")
+        manifest_end = source.index("\n}\n\nstart_mode", manifest_start)
+        manifest_body = source[manifest_start:manifest_end]
+        self.assertIn("compile_cache_namespace", manifest_body)
+        self.assertIn("compile_cache_container_dir", manifest_body)
+        self.assertIn("gpu_model", manifest_body)
+        self.assertIn("driver_version", manifest_body)
+        self.assertIn("warmup_profile_version", manifest_body)
+        self.assertIn("compile_cache_provenance_hash", manifest_body)
+        self.assertIn("compile_cache_snapshot_before", manifest_body)
+        self.assertIn("compile_cache_snapshot_after_warmup", manifest_body)
+
+        cache_start = source.index("ensure_cache_namespace()")
+        cache_end = source.index("\n}\n\ncapture_cache_snapshot", cache_start)
+        cache_body = source[cache_start:cache_end]
+        self.assertIn("for index in 0 1 2 3; do", cache_body)
+        self.assertIn("cache provenance mismatch", cache_body)
+        self.assertIn("CACHE_PROVENANCE_HASH", cache_body)
+        snapshot_start = source.index("capture_cache_snapshot()")
+        snapshot_end = source.index("\n}\n\nwrite_remote_env", snapshot_start)
+        snapshot_body = source[snapshot_start:snapshot_end]
+        self.assertIn("provenance_material", snapshot_body)
+        self.assertIn("onerror", snapshot_body)
+        self.assertIn("ls-files --others --exclude-standard", source)
+
+    def test_persistent_compile_cache_is_only_mounted_for_the_diagnostic(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        start = source.index("start_mode()")
+        end = source.index("\n}\n\nstart_sampler", start)
+        body = source[start:end]
+
+        self.assertIn('cache_enabled="0"', body)
+        self.assertIn(
+            'if [[ "${mode}" == "state_machine" && '
+            '"${ENABLE_CANDIDATE_PREFILL_WARMUP}" == "1" ]]',
+            body,
+        )
+        self.assertIn('cache_enabled="1"', body)
+        self.assertIn(
+            'write_remote_env "${host}" "${mode}" "${index}" "${flags}" '
+            '"${cache_enabled}"',
+            body,
+        )
+
+        env_start = source.index("write_remote_env()")
+        env_end = source.index("\n}\n\nwait_worker", env_start)
+        env_body = source[env_start:env_end]
+        self.assertIn('if [[ "${cache_enabled}" == "1" ]]', env_body)
+
+    def test_candidate_prefill_diagnostic_cannot_be_reported_as_an_ab_run(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        run_all_start = source.index("run_all()")
+        run_all_end = source.index("\n}\n\ncase", run_all_start)
+        run_all_body = source[run_all_start:run_all_end]
+
+        self.assertIn('ENABLE_CANDIDATE_PREFILL_WARMUP', run_all_body)
+        self.assertIn("state-machine diagnostic", run_all_body)
+        self.assertLess(run_all_body.index("exit 2"), run_all_body.index("preflight"))
+
+        compare_start = source.index("compare()")
+        compare_end = source.index("\n}\n\nrun_all", compare_start)
+        compare_body = source[compare_start:compare_end]
+        self.assertIn("candidate_prefill_warmup_enabled", compare_body)
+        self.assertIn("state-machine diagnostic", compare_body)
+
+    def test_candidate_prefill_warmup_helper_is_checked_in(self):
+        self.assertTrue(WARMUP.is_file(), WARMUP)
 
     def test_dry_run_prints_safe_commands_without_external_actions(self):
         if shutil.which("bash") is None:

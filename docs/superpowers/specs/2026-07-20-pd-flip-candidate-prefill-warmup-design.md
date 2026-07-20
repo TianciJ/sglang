@@ -86,9 +86,15 @@ After all eight warmup requests complete:
 - require zero running and waiting requests on every worker;
 - require node0 to report P and node1-node3 to report D on every TP shard and
   active event loop;
+- require every worker's internal PD Flip FSM to remain `safe` with direction
+  `none`, proving the warmup did not enter a state-machine transition;
 - require the router to report exactly 1P3D with no draining workers;
 - save the final worker and router snapshots;
-- verify the persistent cache is readable and record its post-warmup snapshot.
+- verify the persistent cache is readable and record its post-warmup snapshot;
+- retain the full four-node cache provenance material plus manifest references
+  to the before/after snapshot sets;
+- assign every role or drain transition an action ID and retain full worker or
+  router snapshots on both sides of the mutation.
 
 Only then start the migration sampler, observer, controller, and measured
 40-request trace.
@@ -110,4 +116,3 @@ Primary diagnostic interpretation focuses on the first-wave TTFT timeline and
 the promoted worker's first measured Prefill after D-to-P. Disappearance of the
 staircase supports missing candidate-P process warmup as the cause; it does not
 identify a specific compiler or kernel without profiler evidence.
-

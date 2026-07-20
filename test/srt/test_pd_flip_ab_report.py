@@ -30,6 +30,7 @@ class ABReportTest(unittest.TestCase):
             "observation_seconds": 2.0,
             "hicache_stitch_enabled": False,
             "prefill_donor_enabled": False,
+            "candidate_prefill_warmup_enabled": False,
         }
         for mode in ("baseline", "state_machine"):
             manifest = dict(common)
@@ -282,6 +283,48 @@ class ABReportTest(unittest.TestCase):
         )
         self.assertIn(
             "state machine did not observe both migration batches",
+            summary["validity_errors"],
+        )
+
+    def test_candidate_prefill_warmup_diagnostic_is_not_a_valid_ab_pair(self):
+        from scripts.playground.disaggregation.pd_flip_ab_report import (
+            generate_report,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self._make_run(run_dir)
+            manifest_path = run_dir / "state_machine" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["candidate_prefill_warmup_enabled"] = True
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            summary = generate_report(run_dir)
+
+        self.assertFalse(summary["valid"])
+        self.assertIn(
+            "candidate Prefill warmup is a state-machine diagnostic, not an A/B mode",
+            summary["validity_errors"],
+        )
+
+    def test_missing_candidate_warmup_contract_is_not_assumed_safe(self):
+        from scripts.playground.disaggregation.pd_flip_ab_report import (
+            generate_report,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self._make_run(run_dir)
+            manifest_path = run_dir / "baseline" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("candidate_prefill_warmup_enabled")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            summary = generate_report(run_dir)
+
+        self.assertFalse(summary["valid"])
+        self.assertIn(
+            "both A/B manifests must explicitly disable candidate Prefill warmup",
             summary["validity_errors"],
         )
 
