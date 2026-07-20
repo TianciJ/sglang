@@ -355,79 +355,119 @@ with open(f"{run_dir}/smoke/natural-10k-probe.json", "w", encoding="utf-8") as h
 
 trace_path = os.path.join(run_dir, "trace", "trace.jsonl")
 with open(trace_path, encoding="utf-8") as handle:
-    trace_row = json.loads(next(line for line in handle if line.strip()))
-warmup_body = dict(trace_row["body"])
-warmup_body.pop("custom_params", None)
-warmup_body["max_tokens"] = 1
-warmup_body["stream"] = True
-warmup_body["stream_options"] = {"include_usage": True}
-
-warmup_request = urllib.request.Request(
-    url,
-    data=json.dumps(warmup_body).encode(),
-    headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
-)
-started_utc_value = datetime.now(timezone.utc)
-started_monotonic = time.monotonic()
-first_output_utc_value = None
-first_output_monotonic = None
-completion_tokens = None
-prompt_tokens = None
-finish_reason = None
-response_status = None
-with urllib.request.urlopen(warmup_request, timeout=600) as response:
-    response_status = response.status
-    for raw_line in response:
-        line = raw_line.decode("utf-8").strip()
-        if not line.startswith("data: ") or line == "data: [DONE]":
-            continue
-        event = json.loads(line[6:])
-        usage = event.get("usage") or {}
-        if usage.get("prompt_tokens") is not None:
-            prompt_tokens = int(usage["prompt_tokens"])
-        if usage.get("completion_tokens") is not None:
-            completion_tokens = int(usage["completion_tokens"])
-        choices = event.get("choices") or []
-        if choices and choices[0].get("finish_reason") is not None:
-            finish_reason = choices[0]["finish_reason"]
-        if choices:
-            delta = choices[0].get("delta") or {}
-            content = delta.get("content") or delta.get("reasoning_content") or ""
-            if content and first_output_monotonic is None:
-                first_output_monotonic = time.monotonic()
-                first_output_utc_value = datetime.now(timezone.utc)
-finished_monotonic = time.monotonic()
-finished_utc_value = datetime.now(timezone.utc)
-assert response_status == 200, response_status
-assert first_output_monotonic is not None and first_output_utc_value is not None
-assert completion_tokens == 1, completion_tokens
-assert prompt_tokens is not None and prompt_tokens > 6000, prompt_tokens
-assert finish_reason == "length", finish_reason
-warmup_summary = {
-    "trace_request_id": trace_row["request_id"],
-    "trace_prompt_chars": trace_row.get("prompt_chars"),
-    "prompt_tokens": prompt_tokens,
-    "completion_tokens": completion_tokens,
-    "finish_reason": finish_reason,
-    "response_status": response_status,
-    "started_utc": started_utc_value.isoformat(),
-    "first_output_utc": first_output_utc_value.isoformat(),
-    "finished_utc": finished_utc_value.isoformat(),
-    "log_window_start_utc": (started_utc_value - timedelta(seconds=2)).isoformat(),
-    "log_window_end_utc": (finished_utc_value + timedelta(seconds=2)).isoformat(),
-    "ttft_s": first_output_monotonic - started_monotonic,
-    "total_duration_s": finished_monotonic - started_monotonic,
-    "measured": False,
-    "kv_cache_flushed_after": True,
+    trace_rows = [json.loads(line) for line in handle if line.strip()]
+warmup_kinds = ("long", "short")
+selected_rows = {
+    prompt_kind: next(row for row in trace_rows if row["prompt_kind"] == prompt_kind)
+    for prompt_kind in warmup_kinds
 }
-with open(f"{run_dir}/smoke/long-prefill-warmup.json", "w", encoding="utf-8") as handle:
-    json.dump(warmup_summary, handle, indent=2, sort_keys=True)
-    handle.write("\n")
+
+
+def run_prefill_warmup(prompt_kind, trace_row):
+    warmup_body = dict(trace_row["body"])
+    warmup_body.pop("custom_params", None)
+    warmup_body["max_tokens"] = 1
+    warmup_body["stream"] = True
+    warmup_body["stream_options"] = {"include_usage": True}
+    warmup_request = urllib.request.Request(
+        url,
+        data=json.dumps(warmup_body).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + key,
+        },
+    )
+    started_utc = datetime.now(timezone.utc)
+    started_monotonic = time.monotonic()
+    first_output_utc = None
+    first_output_monotonic = None
+    completion_tokens = None
+    prompt_tokens = None
+    finish_reason = None
+    response_status = None
+    with urllib.request.urlopen(warmup_request, timeout=600) as response:
+        response_status = response.status
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            event = json.loads(line[6:])
+            usage = event.get("usage") or {}
+            if usage.get("prompt_tokens") is not None:
+                prompt_tokens = int(usage["prompt_tokens"])
+            if usage.get("completion_tokens") is not None:
+                completion_tokens = int(usage["completion_tokens"])
+            choices = event.get("choices") or []
+            if choices and choices[0].get("finish_reason") is not None:
+                finish_reason = choices[0]["finish_reason"]
+            if choices:
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content") or delta.get("reasoning_content") or ""
+                if content and first_output_monotonic is None:
+                    first_output_monotonic = time.monotonic()
+                    first_output_utc = datetime.now(timezone.utc)
+    finished_monotonic = time.monotonic()
+    finished_utc = datetime.now(timezone.utc)
+    assert response_status == 200, response_status
+    assert first_output_monotonic is not None and first_output_utc is not None
+    assert completion_tokens == 1, completion_tokens
+    assert prompt_tokens is not None, prompt_tokens
+    assert finish_reason == "length", finish_reason
+    return {
+        "trace_request_id": trace_row["request_id"],
+        "trace_prompt_kind": prompt_kind,
+        "trace_prompt_chars": trace_row.get("prompt_chars"),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "finish_reason": finish_reason,
+        "response_status": response_status,
+        "started_utc": started_utc.isoformat(),
+        "first_output_utc": first_output_utc.isoformat(),
+        "finished_utc": finished_utc.isoformat(),
+        "ttft_s": first_output_monotonic - started_monotonic,
+        "total_duration_s": finished_monotonic - started_monotonic,
+        "measured": False,
+        "kv_cache_flushed_after": True,
+    }
+
+
+warmup_results = {}
+for prompt_kind in warmup_kinds:
+    result = run_prefill_warmup(prompt_kind, selected_rows[prompt_kind])
+    prompt_tokens = result["prompt_tokens"]
+    if prompt_kind == "long":
+        assert prompt_tokens > 6000, prompt_tokens
+    else:
+        assert 500 <= prompt_tokens <= 1000, prompt_tokens
+    warmup_results[prompt_kind] = result
+
+log_window_start = (
+    datetime.fromisoformat(warmup_results["long"]["started_utc"])
+    - timedelta(seconds=2)
+).isoformat()
+log_window_end = (
+    datetime.fromisoformat(warmup_results["short"]["finished_utc"])
+    + timedelta(seconds=2)
+).isoformat()
+for result in warmup_results.values():
+    result["log_window_start_utc"] = log_window_start
+    result["log_window_end_utc"] = log_window_end
+
+warmup_files = {
+    "long": "long-prefill-warmup.json",
+    "short": "short-prefill-warmup.json",
+}
+for prompt_kind in warmup_kinds:
+    with open(
+        f"{run_dir}/smoke/{warmup_files[prompt_kind]}", "w", encoding="utf-8"
+    ) as handle:
+        json.dump(warmup_results[prompt_kind], handle, indent=2, sort_keys=True)
+        handle.write("\n")
 PY
 REMOTE
   local warmup_since warmup_until
   read -r warmup_since warmup_until < <(
-    ssh "${host}" "python3 -c \"import json; d=json.load(open('${RUN_DIR}/smoke/long-prefill-warmup.json')); print(d['log_window_start_utc'], d['log_window_end_utc'])\""
+    ssh "${host}" "python3 -c \"import json; a=json.load(open('${RUN_DIR}/smoke/long-prefill-warmup.json')); b=json.load(open('${RUN_DIR}/smoke/short-prefill-warmup.json')); print(a['log_window_start_utc'], b['log_window_end_utc'])\""
   )
   sleep 2
   for index in 0 1 2 3; do
@@ -453,13 +493,10 @@ REMOTE
     fi
   done
   if [[ "${flush_ok}" != "1" ]]; then
-    echo "cache flush was not proven; relaunching exact run-owned inference containers" >&2
-    stop_inference
-    start_all
-    ssh "${host}" "printf '%s\n' 'cold state established by exact run-owned worker relaunch' > '${RUN_DIR}/smoke/cold-state.txt'"
-  else
-    ssh "${host}" "printf '%s\n' 'cold state established by successful four-worker flush_cache' > '${RUN_DIR}/smoke/cold-state.txt'"
+    echo "post-warmup cache flush failed; preserving forensic run without relaunch" >&2
+    return 1
   fi
+  ssh "${host}" "printf '%s\n' 'process warm; KV cold after successful dual-prefill warmup flush' > '${RUN_DIR}/smoke/cold-state.txt'"
 }
 
 measure() {

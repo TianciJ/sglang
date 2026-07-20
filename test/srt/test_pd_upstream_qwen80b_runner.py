@@ -46,23 +46,39 @@ def test_smoke_includes_unmeasured_10000_token_natural_output_probe_and_cold_gat
     assert "flush_cache" in text
 
 
-def test_smoke_warms_trace_long_prompt_before_flush_and_captures_log_window():
+def test_smoke_warms_long_and_short_trace_prompts_before_one_flush():
     text = source()
+    assert 'warmup_kinds = ("long", "short")' in text
     assert "long-prefill-warmup.json" in text
+    assert "short-prefill-warmup.json" in text
     assert 'trace_path = os.path.join(run_dir, "trace", "trace.jsonl")' in text
+    assert 'next(row for row in trace_rows if row["prompt_kind"] == prompt_kind)' in text
     assert 'warmup_body = dict(trace_row["body"])' in text
     assert 'warmup_body.pop("custom_params", None)' in text
     assert 'warmup_body["max_tokens"] = 1' in text
+    assert 'assert prompt_tokens > 6000' in text
+    assert 'assert 500 <= prompt_tokens <= 1000' in text
+    assert '"measured": False' in text
+    assert '"kv_cache_flushed_after": True' in text
     assert '"started_utc"' in text
     assert '"first_output_utc"' in text
     assert '"finished_utc"' in text
     assert 'warmup-node${index}.docker.log' in text
     assert "warmup-router.docker.log" in text
 
-    warmup_record = text.index("long-prefill-warmup.json")
-    flush = text.index("flush_cache", warmup_record)
+    long_record = text.index("long-prefill-warmup.json")
+    short_record = text.index("short-prefill-warmup.json")
+    flush = text.index("flush_cache", short_record)
     measure = text.index("measure\n", text.index("run_all()"))
-    assert warmup_record < flush < measure
+    assert long_record < short_record < flush < measure
+
+
+def test_dual_warmup_flush_failure_is_forensic_instead_of_relaunching():
+    text = source()
+    assert "post-warmup cache flush failed" in text
+    flush_failure = text.index("post-warmup cache flush failed")
+    measure = text.index("measure\n", text.index("run_all()"))
+    assert flush_failure < measure
 
 
 def test_manifest_keeps_gid_index_and_mooncake_hosts_as_separate_fields():

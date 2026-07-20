@@ -107,12 +107,17 @@ It performs `preflight`, `build-router`, `prepare`, `start`, `smoke`,
 4. Send two unique, non-measured 32-token smoke requests through Prefill-to-Decode.
 5. Send one unique, non-measured natural-output 10,000-token probe and require
    exact usage count plus `finish_reason=length`.
-6. Copy the first long request body from the frozen trace, generate one token,
-   and retain its client timing plus a timestamp-window Docker log from every
-   worker and the router. This exercises the formal 6.4k-token Prefill shape
-   without adding the request to measured rows.
-7. Flush all four upstream caches. If any flush cannot be proven, relaunch only
-   the exact run-owned router/workers and repeat readiness gates.
+6. Copy the first long and first short request bodies from the frozen trace.
+   Run them sequentially in `long` then `short` order, generate exactly one
+   token from each, and retain separate client timing records plus one Docker
+   log window spanning both requests on every worker and the router. These
+   exercise the formal approximately 6.4k- and 650-token Prefill shapes without
+   adding either request to measured rows.
+7. Flush all four upstream caches after both warmups. This clears KV/Radix
+   reuse while retaining process-level compiled kernels, allocator state, and
+   workspaces. If any post-warmup flush cannot be proven, preserve the attempt
+   as `forensic` and stop exact run-owned resources; do not relaunch under the
+   same run ID because that would erase the warmup state.
 8. Replay the trace once through an external no-GPU helper.
 9. Reject the run unless all request integrity and raw-evidence gates pass.
 10. Capture redacted inspect records and logs, gracefully stop exact owned
@@ -174,6 +179,7 @@ inspect/
 status/
 smoke/
   long-prefill-warmup.json
+  short-prefill-warmup.json
 logs/
   warmup-node0.docker.log ... warmup-node3.docker.log
   warmup-router.docker.log
