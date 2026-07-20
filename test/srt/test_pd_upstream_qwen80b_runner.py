@@ -15,6 +15,8 @@ def source() -> str:
 
 
 def wsl_path(path: Path) -> str:
+    if not path.drive:
+        return path.as_posix()
     drive = path.drive.rstrip(":").lower()
     tail = path.as_posix().split(":", 1)[1]
     return f"/mnt/{drive}{tail}"
@@ -73,6 +75,13 @@ def test_smoke_warms_long_and_short_trace_prompts_before_one_flush():
     assert long_record < short_record < flush < measure
 
 
+def test_dual_warmup_log_window_is_compatible_with_python36_host():
+    text = source()
+    assert "datetime.fromisoformat" not in text
+    assert "warmup_window_start = datetime.now(timezone.utc) - timedelta(seconds=2)" in text
+    assert "warmup_window_end = datetime.now(timezone.utc) + timedelta(seconds=2)" in text
+
+
 def test_dual_warmup_flush_failure_is_forensic_instead_of_relaunching():
     text = source()
     assert "post-warmup cache flush failed" in text
@@ -105,6 +114,7 @@ def test_never_mounts_host_code_into_worker_or_router_and_has_no_custom_flags():
 
 def test_uses_only_exact_owned_names_and_safe_stop_primitives():
     text = source()
+    assert "set -Eeuo pipefail" in text
     assert "tiancij-upstream-%s-node%s" in text
     assert "tiancij-upstream-%s-router" in text
     assert "tiancij-upstream-router-build-%s" in text

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -431,6 +431,7 @@ def run_prefill_warmup(prompt_kind, trace_row):
     }
 
 
+warmup_window_start = datetime.now(timezone.utc) - timedelta(seconds=2)
 warmup_results = {}
 for prompt_kind in warmup_kinds:
     result = run_prefill_warmup(prompt_kind, selected_rows[prompt_kind])
@@ -441,14 +442,9 @@ for prompt_kind in warmup_kinds:
         assert 500 <= prompt_tokens <= 1000, prompt_tokens
     warmup_results[prompt_kind] = result
 
-log_window_start = (
-    datetime.fromisoformat(warmup_results["long"]["started_utc"])
-    - timedelta(seconds=2)
-).isoformat()
-log_window_end = (
-    datetime.fromisoformat(warmup_results["short"]["finished_utc"])
-    + timedelta(seconds=2)
-).isoformat()
+warmup_window_end = datetime.now(timezone.utc) + timedelta(seconds=2)
+log_window_start = warmup_window_start.isoformat()
+log_window_end = warmup_window_end.isoformat()
 for result in warmup_results.values():
     result["log_window_start_utc"] = log_window_start
     result["log_window_end_utc"] = log_window_end
