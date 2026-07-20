@@ -17,6 +17,8 @@ GPU_IDS="${GPU_IDS:-0,1,2,3}"
 PORT="${PORT:-30000}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
 BOOTSTRAP_PORT="${BOOTSTRAP_PORT:-8998}"
+IB_DEVICE="${IB_DEVICE:-mlx5_0}"
+MC_GID_INDEX="${MC_GID_INDEX:-}"
 TRACE_REQUESTS="${TRACE_REQUESTS:-40}"
 TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
 TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-的}"
@@ -64,7 +66,7 @@ cache_provenance_material() {
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
   image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
   selected_gpus="$(ssh "${host}" "nvidia-smi -i '${GPU_IDS}' --query-gpu=index,name,compute_cap,driver_version --format=csv,noheader | LC_ALL=C sort")"
-  printf '%s' "code=${code_hash}|model=${model_hash}|image=${image_id}|selected_gpus=${selected_gpus}|tp=${TP_SIZE}|dp=${DP_SIZE}|gpu_ids=${GPU_IDS}|mem=${MEM_FRACTION_STATIC:-0.88}|dp_attention=${ENABLE_DP_ATTENTION:-0}|transfer=${TRANSFER_BACKEND:-mooncake}|extra=${EXTRA_SGLANG_ARGS:-}|profile=${WARMUP_PROFILE_VERSION}"
+  printf '%s' "code=${code_hash}|model=${model_hash}|image=${image_id}|selected_gpus=${selected_gpus}|tp=${TP_SIZE}|dp=${DP_SIZE}|gpu_ids=${GPU_IDS}|mem=${MEM_FRACTION_STATIC:-0.88}|dp_attention=${ENABLE_DP_ATTENTION:-0}|transfer=${TRANSFER_BACKEND:-mooncake}|ib_device=${IB_DEVICE}|mc_gid_index=${MC_GID_INDEX}|extra=${EXTRA_SGLANG_ARGS:-}|profile=${WARMUP_PROFILE_VERSION}"
 }
 
 dry_note() {
@@ -131,6 +133,10 @@ preflight() {
     return
   fi
   require_secret
+  if [[ -z "${MC_GID_INDEX}" ]]; then
+    echo "MC_GID_INDEX must be set explicitly for the selected RDMA device" >&2
+    exit 2
+  fi
   local missing=() expected_code="" expected_model="" expected_image=""
   local gpu_list="${GPU_IDS//,/ }"
   for index in 0 1 2 3; do
@@ -145,6 +151,7 @@ preflight() {
       ssh "${host}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${ROUTER_PORT})$'"
     fi
     ssh "${host}" "for gpu in ${gpu_list}; do test -z \"\$(nvidia-smi -i \"\$gpu\" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' || true)\" || { echo selected GPU \$gpu is busy >&2; exit 1; }; done"
+    ssh "${host}" "test -d '/sys/class/infiniband/${IB_DEVICE}' || { echo 'selected RDMA device ${IB_DEVICE} is unavailable' >&2; exit 1; }; gid_file='/sys/class/infiniband/${IB_DEVICE}/ports/1/gids/${MC_GID_INDEX}'; test -r \"\$gid_file\" || { echo 'selected RDMA GID index ${MC_GID_INDEX} is unavailable on ${IB_DEVICE}' >&2; exit 1; }; gid=\$(cat \"\$gid_file\"); test -n \"\$gid\" && test \"\$gid\" != '0000:0000:0000:0000:0000:0000:0000:0000'"
     code_hash="$(remote_code_hash "${host}")"
     model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
     image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
@@ -236,8 +243,8 @@ PORT=${PORT}
 ROUTER_PORT=${ROUTER_PORT}
 BOOTSTRAP_PORT=${BOOTSTRAP_PORT}
 TRANSFER_BACKEND=${TRANSFER_BACKEND:-mooncake}
-IB_DEVICE=${IB_DEVICE:-mlx5_0}
-MC_GID_INDEX=${MC_GID_INDEX:-}
+IB_DEVICE=${IB_DEVICE}
+MC_GID_INDEX=${MC_GID_INDEX}
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.88}
 GPU_IDS=${GPU_IDS}
 TP_SIZE=${TP_SIZE}
@@ -298,7 +305,7 @@ write_mode_manifest() {
   if [[ "${ENABLE_DP_ATTENTION:-0}" == "1" ]]; then
     dp_attention_enabled=true
   fi
-  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"code_revision\":\"${code_revision}\",\"router_binary_hash\":\"${router_binary_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
+  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"code_revision\":\"${code_revision}\",\"router_binary_hash\":\"${router_binary_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"ib_device\":\"${IB_DEVICE}\",\"mc_gid_index\":${MC_GID_INDEX},\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
   encoded="$(printf '%s\n' "${content}" | base64 | tr -d '\n')"
   ssh "${host}" "printf '%s' '${encoded}' | base64 -d > '${RUN_DIR}/${mode}/manifest.json'"
 }

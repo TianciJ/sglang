@@ -246,6 +246,15 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("experimental/sgl-router/target/release/sgl-router", source)
         self.assertIn("code_revision", manifest_body)
         self.assertIn("router_binary_hash", manifest_body)
+        self.assertIn("ib_device", manifest_body)
+        self.assertIn("mc_gid_index", manifest_body)
+
+        preflight_start = source.index("preflight()")
+        preflight_end = source.index("\n}\n\nprepare", preflight_start)
+        preflight_body = source[preflight_start:preflight_end]
+        self.assertIn("MC_GID_INDEX must be set", preflight_body)
+        self.assertIn("/sys/class/infiniband/${IB_DEVICE}/ports/1/gids/${MC_GID_INDEX}", preflight_body)
+        self.assertIn("selected RDMA device", preflight_body)
 
     def test_persistent_compile_cache_is_only_mounted_for_the_diagnostic(self):
         source = RUNNER.read_text(encoding="utf-8")

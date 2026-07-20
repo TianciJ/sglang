@@ -150,6 +150,11 @@ orchestration files, so a worker host without a system `git` binary is still
 validated; the coordinator's revision and router binary hash are recorded
 separately.
 
+Set `IB_DEVICE` and `MC_GID_INDEX` explicitly to the validated common RoCE
+path. The successful four-node reference uses `mlx5_bond_1` and GID index `3`;
+preflight now rejects a missing device, unreadable GID entry, or all-zero GID
+before any model container starts.
+
 ## Artifact layout
 
 Artifacts are rooted at `${ARTIFACT_ROOT}/${RUN_ID}` on node0:
