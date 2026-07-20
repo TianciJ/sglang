@@ -253,6 +253,7 @@ import os
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 router_port, model_id, run_id, run_dir = sys.argv[1:]
 key = os.environ["ADMIN_API_KEY"]
@@ -351,8 +352,90 @@ probe_summary = {
 with open(f"{run_dir}/smoke/natural-10k-probe.json", "w", encoding="utf-8") as handle:
     json.dump(probe_summary, handle, indent=2, sort_keys=True)
     handle.write("\n")
+
+trace_path = os.path.join(run_dir, "trace", "trace.jsonl")
+with open(trace_path, encoding="utf-8") as handle:
+    trace_row = json.loads(next(line for line in handle if line.strip()))
+warmup_body = dict(trace_row["body"])
+warmup_body.pop("custom_params", None)
+warmup_body["max_tokens"] = 1
+warmup_body["stream"] = True
+warmup_body["stream_options"] = {"include_usage": True}
+
+warmup_request = urllib.request.Request(
+    url,
+    data=json.dumps(warmup_body).encode(),
+    headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+)
+started_utc_value = datetime.now(timezone.utc)
+started_monotonic = time.monotonic()
+first_output_utc_value = None
+first_output_monotonic = None
+completion_tokens = None
+prompt_tokens = None
+finish_reason = None
+response_status = None
+with urllib.request.urlopen(warmup_request, timeout=600) as response:
+    response_status = response.status
+    for raw_line in response:
+        line = raw_line.decode("utf-8").strip()
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        event = json.loads(line[6:])
+        usage = event.get("usage") or {}
+        if usage.get("prompt_tokens") is not None:
+            prompt_tokens = int(usage["prompt_tokens"])
+        if usage.get("completion_tokens") is not None:
+            completion_tokens = int(usage["completion_tokens"])
+        choices = event.get("choices") or []
+        if choices and choices[0].get("finish_reason") is not None:
+            finish_reason = choices[0]["finish_reason"]
+        if choices:
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content") or delta.get("reasoning_content") or ""
+            if content and first_output_monotonic is None:
+                first_output_monotonic = time.monotonic()
+                first_output_utc_value = datetime.now(timezone.utc)
+finished_monotonic = time.monotonic()
+finished_utc_value = datetime.now(timezone.utc)
+assert response_status == 200, response_status
+assert first_output_monotonic is not None and first_output_utc_value is not None
+assert completion_tokens == 1, completion_tokens
+assert prompt_tokens is not None and prompt_tokens > 6000, prompt_tokens
+assert finish_reason == "length", finish_reason
+warmup_summary = {
+    "trace_request_id": trace_row["request_id"],
+    "trace_prompt_chars": trace_row.get("prompt_chars"),
+    "prompt_tokens": prompt_tokens,
+    "completion_tokens": completion_tokens,
+    "finish_reason": finish_reason,
+    "response_status": response_status,
+    "started_utc": started_utc_value.isoformat(),
+    "first_output_utc": first_output_utc_value.isoformat(),
+    "finished_utc": finished_utc_value.isoformat(),
+    "log_window_start_utc": (started_utc_value - timedelta(seconds=2)).isoformat(),
+    "log_window_end_utc": (finished_utc_value + timedelta(seconds=2)).isoformat(),
+    "ttft_s": first_output_monotonic - started_monotonic,
+    "total_duration_s": finished_monotonic - started_monotonic,
+    "measured": False,
+    "kv_cache_flushed_after": True,
+}
+with open(f"{run_dir}/smoke/long-prefill-warmup.json", "w", encoding="utf-8") as handle:
+    json.dump(warmup_summary, handle, indent=2, sort_keys=True)
+    handle.write("\n")
 PY
 REMOTE
+  local warmup_since warmup_until
+  read -r warmup_since warmup_until < <(
+    ssh "${host}" "python3 -c \"import json; d=json.load(open('${RUN_DIR}/smoke/long-prefill-warmup.json')); print(d['log_window_start_utc'], d['log_window_end_utc'])\""
+  )
+  sleep 2
+  for index in 0 1 2 3; do
+    ssh "${SSH_HOSTS[$index]}" "test \"\$(docker inspect '$(worker_name "${index}")' --format '{{index .Config.Labels \"tiancij.run_id\"}}')\" = '${RUN_ID}'; docker logs --timestamps --since '${warmup_since}' --until '${warmup_until}' '$(worker_name "${index}")' 2>&1" | \
+      ssh "${host}" "cat > '${RUN_DIR}/logs/warmup-node${index}.docker.log'"
+  done
+  ssh "${host}" "test \"\$(docker inspect '$(router_name)' --format '{{index .Config.Labels \"tiancij.run_id\"}}')\" = '${RUN_ID}'; docker logs --timestamps --since '${warmup_since}' --until '${warmup_until}' '$(router_name)' 2>&1" | \
+    ssh "${host}" "cat > '${RUN_DIR}/logs/warmup-router.docker.log'"
   local flush_ok=1 flush_response
   for index in 0 1 2 3; do
     if ! flush_response="$(ssh "${SSH_HOSTS[$index]}" bash -s -- "${RUN_DIR}/node${index}/worker.env" "http://${NODE_IPS[$index]}:${WORKER_PORT}/flush_cache" <<'REMOTE'
@@ -434,15 +517,29 @@ collect_logs() {
   local index host name
   for index in 0 1 2 3; do
     host="${SSH_HOSTS[$index]}"; name="$(worker_name "${index}")"
-    ssh "${host}" "docker logs --timestamps '${name}' 2>&1 || true" | ssh "${SSH_HOSTS[0]}" "cat > '${RUN_DIR}/logs/node${index}.docker.log'"
+    ssh "${host}" "docker logs --timestamps '${name}' 2>&1 || true" | \
+      sed -E "s/(admin_api_key=)'[^']*'/\1'<redacted>'/g; s/(ADMIN_API_KEY=)[^\" ,]+/\1<redacted>/g" | \
+      ssh "${SSH_HOSTS[0]}" "cat > '${RUN_DIR}/logs/node${index}.docker.log'"
     ssh "${host}" "docker inspect '${name}' | sed -E 's/(ADMIN_API_KEY=)[^\"]+/\1<redacted>/g' || true" | ssh "${SSH_HOSTS[0]}" "cat > '${RUN_DIR}/inspect/node${index}.final.json'"
   done
-  ssh "${SSH_HOSTS[0]}" "docker logs --timestamps '$(router_name)' > '${RUN_DIR}/logs/router.docker.log' 2>&1 || true; docker inspect '$(router_name)' > '${RUN_DIR}/inspect/router.final.json' 2>/dev/null || true"
+  ssh "${SSH_HOSTS[0]}" "docker logs --timestamps '$(router_name)' 2>&1 || true" | \
+    sed -E "s/(admin_api_key=)'[^']*'/\1'<redacted>'/g; s/(ADMIN_API_KEY=)[^\" ,]+/\1<redacted>/g" | \
+    ssh "${SSH_HOSTS[0]}" "cat > '${RUN_DIR}/logs/router.docker.log'"
+  ssh "${SSH_HOSTS[0]}" "docker inspect '$(router_name)' > '${RUN_DIR}/inspect/router.final.json' 2>/dev/null || true"
+}
+
+cleanup_secret_files() {
+  local index
+  ssh "${SSH_HOSTS[0]}" "rm -f -- '${RUN_DIR}/helper.env'"
+  for index in 0 1 2 3; do
+    ssh "${SSH_HOSTS[$index]}" "rm -f -- '${RUN_DIR}/node${index}/worker.env'"
+  done
 }
 
 collect_stop() {
   collect_logs
   stop_inference
+  cleanup_secret_files
   local index host
   for index in 0 1 2 3; do
     host="${SSH_HOSTS[$index]}"
@@ -463,7 +560,7 @@ on_failure() {
   local status="$1"
   trap - ERR INT TERM
   set +e
-  if [[ "${ACTIVE}" == "1" ]]; then collect_logs; stop_inference; fi
+  if [[ "${ACTIVE}" == "1" ]]; then collect_logs; stop_inference; cleanup_secret_files; fi
   ssh "${SSH_HOSTS[0]}" "if test -f '${RUN_DIR}/manifest.json'; then python3 -c \"import json; p='${RUN_DIR}/manifest.json'; d=json.load(open(p)); d['validity']='forensic'; d['failure_exit_code']=${status}; open(p,'w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\"; fi" >/dev/null 2>&1
   return "${status}"
 }

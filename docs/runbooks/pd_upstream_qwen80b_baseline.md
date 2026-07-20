@@ -107,11 +107,15 @@ It performs `preflight`, `build-router`, `prepare`, `start`, `smoke`,
 4. Send two unique, non-measured 32-token smoke requests through Prefill-to-Decode.
 5. Send one unique, non-measured natural-output 10,000-token probe and require
    exact usage count plus `finish_reason=length`.
-6. Flush all four upstream caches. If any flush cannot be proven, relaunch only
+6. Copy the first long request body from the frozen trace, generate one token,
+   and retain its client timing plus a timestamp-window Docker log from every
+   worker and the router. This exercises the formal 6.4k-token Prefill shape
+   without adding the request to measured rows.
+7. Flush all four upstream caches. If any flush cannot be proven, relaunch only
    the exact run-owned router/workers and repeat readiness gates.
-7. Replay the trace once through an external no-GPU helper.
-8. Reject the run unless all request integrity and raw-evidence gates pass.
-9. Capture redacted inspect records and logs, gracefully stop exact owned
+8. Replay the trace once through an external no-GPU helper.
+9. Reject the run unless all request integrity and raw-evidence gates pass.
+10. Capture redacted inspect records and logs, gracefully stop exact owned
    containers, verify ports, GPUs, and driver health, and generate the report.
 
 The worker and router obtain SGLang code only from the clean image. The modified
@@ -169,6 +173,10 @@ logs/router.docker.log
 inspect/
 status/
 smoke/
+  long-prefill-warmup.json
+logs/
+  warmup-node0.docker.log ... warmup-node3.docker.log
+  warmup-router.docker.log
 report/summary.json
 report/request_metrics.csv
 report/ttft_scatter.svg

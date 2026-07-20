@@ -46,6 +46,25 @@ def test_smoke_includes_unmeasured_10000_token_natural_output_probe_and_cold_gat
     assert "flush_cache" in text
 
 
+def test_smoke_warms_trace_long_prompt_before_flush_and_captures_log_window():
+    text = source()
+    assert "long-prefill-warmup.json" in text
+    assert 'trace_path = os.path.join(run_dir, "trace", "trace.jsonl")' in text
+    assert 'warmup_body = dict(trace_row["body"])' in text
+    assert 'warmup_body.pop("custom_params", None)' in text
+    assert 'warmup_body["max_tokens"] = 1' in text
+    assert '"started_utc"' in text
+    assert '"first_output_utc"' in text
+    assert '"finished_utc"' in text
+    assert 'warmup-node${index}.docker.log' in text
+    assert "warmup-router.docker.log" in text
+
+    warmup_record = text.index("long-prefill-warmup.json")
+    flush = text.index("flush_cache", warmup_record)
+    measure = text.index("measure\n", text.index("run_all()"))
+    assert warmup_record < flush < measure
+
+
 def test_manifest_keeps_gid_index_and_mooncake_hosts_as_separate_fields():
     text = source()
     assert "'mc_gid_index':${MC_GID_INDEX},'mooncake_hosts':" in text
@@ -170,6 +189,18 @@ def test_can_load_admin_key_from_private_file_without_printing_it():
     assert 'if [[ -n "${ADMIN_API_KEY_FILE:-}" ]]' in text
     assert '[[ -r "${ADMIN_API_KEY_FILE}" ]]' in text
     assert 'ADMIN_API_KEY="${ADMIN_API_KEY#ADMIN_API_KEY=}"' in text
+
+
+def test_collected_logs_redact_server_args_key_and_teardown_removes_secret_envs():
+    text = source()
+    assert "admin_api_key=" in text
+    assert "<redacted>" in text
+    assert "rm -f -- '${RUN_DIR}/helper.env'" in text
+    assert "for index in 0 1 2 3" in text
+    assert "'${RUN_DIR}/node${index}/worker.env'" in text
+    cleanup = text.index("rm -f -- '${RUN_DIR}/helper.env'")
+    inventory = text.rindex("INVENTORY.txt")
+    assert cleanup < inventory
 
 
 def test_passes_validated_ipv6_mooncake_identity_separately_from_http_ip():
