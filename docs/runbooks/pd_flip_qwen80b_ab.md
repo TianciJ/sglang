@@ -145,6 +145,10 @@ Every worker-role, router-role, and drain transition records a shared action ID
 with full before/after JSON snapshots. Cache snapshots fail closed on unreadable
 directories and retain the complete per-node provenance material needed to
 audit the namespace hash; the mode manifest links both snapshot sets.
+The cross-node code fingerprint hashes the actual Python, experiment, and
+orchestration files, so a worker host without a system `git` binary is still
+validated; the coordinator's revision and router binary hash are recorded
+separately.
 
 ## Artifact layout
 

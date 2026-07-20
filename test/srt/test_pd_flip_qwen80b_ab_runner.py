@@ -241,7 +241,11 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         snapshot_body = source[snapshot_start:snapshot_end]
         self.assertIn("provenance_material", snapshot_body)
         self.assertIn("onerror", snapshot_body)
-        self.assertIn("ls-files --others --exclude-standard", source)
+        self.assertIn("remote_code_revision()", source)
+        self.assertIn("find python scripts/playground/disaggregation experiments", source)
+        self.assertIn("experimental/sgl-router/target/release/sgl-router", source)
+        self.assertIn("code_revision", manifest_body)
+        self.assertIn("router_binary_hash", manifest_body)
 
     def test_persistent_compile_cache_is_only_mounted_for_the_diagnostic(self):
         source = RUNNER.read_text(encoding="utf-8")

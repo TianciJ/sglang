@@ -50,7 +50,12 @@ redacted() {
 
 remote_code_hash() {
   local host="$1"
-  ssh "${host}" "head=\$(git -C '${SGLANG_REPO}' rev-parse HEAD 2>/dev/null || cat '${SGLANG_REPO}/.git/refs/heads/main'); patch=\$(git -C '${SGLANG_REPO}' diff --binary --no-ext-diff HEAD -- . ':!pd_flip_session.json' | sha256sum | awk '{print \$1}'); untracked=\$(git -C '${SGLANG_REPO}' ls-files --others --exclude-standard -- python scripts experiments | LC_ALL=C sort | while IFS= read -r path; do sha256sum '${SGLANG_REPO}/'\"\$path\"; done | sha256sum | awk '{print \$1}'); printf '%s|%s|%s' \"\$head\" \"\$patch\" \"\$untracked\" | sha256sum | awk '{print \$1}'"
+  ssh "${host}" "cd '${SGLANG_REPO}' && find python scripts/playground/disaggregation experiments -type f \( -name '*.py' -o -name '*.sh' -o -name '*.rs' -o -name '*.toml' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' \) ! -path '*/__pycache__/*' ! -name 'pd_flip_session.json' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print \$1}'"
+}
+
+remote_code_revision() {
+  local host="$1"
+  ssh "${host}" "if command -v git >/dev/null 2>&1 && git -C '${SGLANG_REPO}' rev-parse HEAD >/dev/null 2>&1; then git -C '${SGLANG_REPO}' rev-parse HEAD; elif test -f '${SGLANG_REPO}/.git/refs/heads/main'; then cat '${SGLANG_REPO}/.git/refs/heads/main'; else printf unavailable; fi"
 }
 
 cache_provenance_material() {
@@ -268,7 +273,7 @@ wait_worker() {
 }
 
 write_mode_manifest() {
-  local mode="$1" host="${SSH_HOSTS[0]}" topology trace_sha code_hash model_hash image_id gpu_model driver_version content encoded state_enabled role_switch_enabled
+  local mode="$1" host="${SSH_HOSTS[0]}" topology trace_sha code_hash code_revision router_binary_hash model_hash image_id gpu_model driver_version content encoded state_enabled role_switch_enabled
   topology="1P3D"
   state_enabled=false
   role_switch_enabled=false
@@ -278,6 +283,8 @@ write_mode_manifest() {
   fi
   trace_sha="$(ssh "${host}" "python3 -c \"import json; print(json.load(open('${RUN_DIR}/trace/manifest.json'))['trace_sha256'])\"")"
   code_hash="$(remote_code_hash "${host}")"
+  code_revision="$(remote_code_revision "${host}")"
+  router_binary_hash="$(ssh "${host}" "sha256sum '${SGLANG_REPO}/experimental/sgl-router/target/release/sgl-router' | awk '{print \$1}'")"
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
   image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
   gpu_model="$(ssh "${host}" "nvidia-smi -i '${GPU_IDS%%,*}' --query-gpu=name,compute_cap --format=csv,noheader | head -n1")"
@@ -291,7 +298,7 @@ write_mode_manifest() {
   if [[ "${ENABLE_DP_ATTENTION:-0}" == "1" ]]; then
     dp_attention_enabled=true
   fi
-  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
+  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"code_revision\":\"${code_revision}\",\"router_binary_hash\":\"${router_binary_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
   encoded="$(printf '%s\n' "${content}" | base64 | tr -d '\n')"
   ssh "${host}" "printf '%s' '${encoded}' | base64 -d > '${RUN_DIR}/${mode}/manifest.json'"
 }
