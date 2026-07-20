@@ -20,16 +20,35 @@ def wsl_path(path: Path) -> str:
     return f"/mnt/{drive}{tail}"
 
 
-def test_pins_clean_image_trace_and_fixed_workload_contract():
+def test_pins_clean_image_natural_trace_and_fixed_workload_contract():
     text = source()
     assert "tiancij/sglang-upstream:v0.5.15-clean" in text
     assert "sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e" in text
-    assert "82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964" in text
+    assert "c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d" in text
+    assert "qwen80b-trace40-natural" in text
     assert "EXPECTED_REQUESTS=40" in text
     assert "EXPECTED_TOKENS=10000" in text
-    assert "EXPECTED_LEDGER_ROWS=400040" in text
-    assert "EXPECTED_TPOT_ROWS=399960" in text
     assert "--max-workers 40" in text
+    assert "--portable-forced-token-processor" not in text
+    assert "client_runtime_processor" not in text
+    assert "--enable-custom-logit-processor" not in text
+    assert "'output_contract':'natural'" in text
+    assert "client_first_last_output_over_usage_completion_tokens" in text
+
+
+def test_smoke_includes_unmeasured_10000_token_natural_output_probe_and_cold_gate():
+    text = source()
+    assert "natural-10k-probe.json" in text
+    assert '"max_tokens": 10000' in text
+    assert '"ignore_eos": True' in text
+    assert "completion_tokens == 10000" in text
+    assert 'finish_reason == "length"' in text
+    assert "flush_cache" in text
+
+
+def test_manifest_keeps_gid_index_and_mooncake_hosts_as_separate_fields():
+    text = source()
+    assert "'mc_gid_index':${MC_GID_INDEX},'mooncake_hosts':" in text
 
 
 def test_never_mounts_host_code_into_worker_or_router_and_has_no_custom_flags():
@@ -42,6 +61,7 @@ def test_never_mounts_host_code_into_worker_or_router_and_has_no_custom_flags():
         "--enable-pd-flip-prefill-donor",
         "--enable-hierarchical-cache",
         "--disaggregation-decode-enable-radix-cache",
+        "--enable-custom-logit-processor",
     ):
         assert forbidden not in text
     assert "cd /sgl-workspace/sglang" in text
@@ -59,6 +79,18 @@ def test_uses_only_exact_owned_names_and_safe_stop_primitives():
     for unsafe in ("docker restart", "pkill", "killall", "kill -9", "docker rm -f"):
         assert unsafe not in text
     assert "docker ps -aq --filter name=" not in text
+
+
+def test_gpu_device_request_keeps_all_four_ids_in_one_docker_argument():
+    text = source()
+    assert '--gpus "\\\"device=$gpus\\\""' in text
+
+
+def test_safe_stop_removes_created_containers_without_stopping_them():
+    text = source()
+    assert 'status="$(docker inspect "$name" --format \'{{.State.Status}}\')"' in text
+    assert 'running|paused|restarting)' in text
+    assert 'docker rm "${name}"' in text
 
 
 def test_has_bounded_gates_concurrent_start_and_purity_inspection():
@@ -145,6 +177,7 @@ def test_passes_validated_ipv6_mooncake_identity_separately_from_http_ip():
     assert 'MOONCAKE_HOSTS=(' in text
     assert 'moon_host="${MOONCAKE_HOSTS[$index]}"' in text
     assert '-e "MOONCAKE_LOCAL_HOSTNAME=$moon_host"' in text
+    assert '-e "SGLANG_HOST_IP=$moon_host"' in text
     assert '-e "MC_USE_IPV6=$use_ipv6"' in text
     assert "show_gids" in text
     assert "mooncake_hosts" in text

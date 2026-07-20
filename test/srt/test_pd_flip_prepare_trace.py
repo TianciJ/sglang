@@ -82,6 +82,88 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         self.assertEqual(row["body"]["custom_params"]["forced_token_id"], 2024)
         self.assertEqual(row["body"]["custom_params"]["forced_text"], "字")
 
+    def test_apply_natural_output_contract_removes_forced_sampling_fields(self):
+        from scripts.playground.disaggregation.pd_flip_prepare_trace import (
+            apply_natural_output_contract,
+        )
+
+        row = {
+            "max_tokens": 1,
+            "body": {
+                "max_tokens": 1,
+                "custom_logit_processor": "module-referenced-processor",
+                "custom_params": {
+                    "forced_text": "x",
+                    "forced_token_id": 2024,
+                    "pd_flip_slo": {"ttft_seconds": 2.0, "tpot_seconds": 0.05},
+                },
+            },
+        }
+
+        apply_natural_output_contract(
+            row,
+            max_tokens=10000,
+            model="Qwen3-Next-80B-A3B-Instruct",
+        )
+
+        self.assertEqual(row["max_tokens"], 10000)
+        self.assertEqual(row["body"]["max_tokens"], 10000)
+        self.assertTrue(row["body"]["stream"])
+        self.assertTrue(row["body"]["ignore_eos"])
+        self.assertIsNone(row["body"]["stop"])
+        self.assertEqual(row["body"]["stream_options"], {"include_usage": True})
+        self.assertNotIn("custom_logit_processor", row["body"])
+        self.assertNotIn("forced_text", row["body"]["custom_params"])
+        self.assertNotIn("forced_token_id", row["body"]["custom_params"])
+        self.assertIn("pd_flip_slo", row["body"]["custom_params"])
+
+    def test_prepare_trace_can_freeze_natural_output_contract(self):
+        from scripts.playground.disaggregation.pd_flip_prepare_trace import (
+            prepare_trace,
+        )
+
+        rows = self._source_rows()
+        for row in rows:
+            row["body"]["custom_logit_processor"] = "old-processor"
+            row["body"]["custom_params"].update(
+                {"forced_text": "x", "forced_token_id": 2024}
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.jsonl"
+            output = root / "natural.jsonl"
+            manifest = root / "manifest.json"
+            source.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            prepare_trace(
+                source=source,
+                output=output,
+                manifest=manifest,
+                wave_size=10,
+                wave_gap_seconds=7.5,
+                intra_wave_interval_seconds=0.5,
+                max_tokens=10000,
+                model="Qwen3-Next-80B-A3B-Instruct",
+                natural_output=True,
+            )
+            frozen = [json.loads(line) for line in output.read_text().splitlines()]
+            schedule = json.loads(manifest.read_text())
+
+        self.assertEqual(len(frozen), 40)
+        self.assertEqual(frozen[-1]["arrival_offset_s"], 27.0)
+        self.assertTrue(all(row["body"]["max_tokens"] == 10000 for row in frozen))
+        self.assertTrue(
+            all("custom_logit_processor" not in row["body"] for row in frozen)
+        )
+        self.assertTrue(
+            all("forced_text" not in row["body"]["custom_params"] for row in frozen)
+        )
+        self.assertEqual(schedule["output_contract"], "natural")
+        self.assertIsNone(schedule["forced_text"])
+
     def test_apply_output_contract_rejects_incomplete_values(self):
         from scripts.playground.disaggregation.pd_flip_prepare_trace import (
             apply_output_contract,
@@ -290,7 +372,7 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
 
         self.assertEqual(args.max_tokens, 10000)
         self.assertEqual(args.forced_text, "字")
-        self.assertEqual(str(args.tokenizer_path), "/models/deepseek_v3.1_terminus")
+        self.assertEqual(args.tokenizer_path.as_posix(), "/models/deepseek_v3.1_terminus")
         self.assertEqual(args.model, "deepseek_v3.1_terminus")
         self.assertEqual(args.tpot_slo_override_seconds, 0.05)
 

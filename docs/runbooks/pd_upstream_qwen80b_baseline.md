@@ -13,9 +13,14 @@ Prefill-donor, or modified router code enters the inference data plane.
 - Placement: four nodes, GPUs `0,1,2,3`, TP 4, DP 1, `1P3D`.
 - RDMA: active `mlx5_bond_0` on every node, per-node bond IPv6 address,
   `MC_USE_IPV6=1`, and GID index 3.
-- Trace SHA256: `82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964`.
-- Workload: 40 requests, 10,000 forced output tokens each, concurrency 40.
-- Valid raw counts: 400,040 ledger rows and 399,960 TPOT interval rows.
+- Natural-output trace SHA256: `c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d`.
+- Source trace SHA256: `82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964`.
+- Workload: 40 requests, native model output, `max_tokens=10000`, `ignore_eos=true`, concurrency 40.
+- No custom logit processor is enabled or serialized in a request.
+- SSE event counts are dynamic because one stream event can contain multiple
+  tokens. Validity is based on 40 unique completed requests, exactly 10,000
+  `usage.completion_tokens` each, `finish_reason=length`, and complete raw
+  client evidence—not a fixed event-row count.
 
 Upstream PD Mooncake uses transfer-engine `P2PHANDSHAKE` metadata for this
 path. It does not need the HiCache/L3 Mooncake Store service. The runner
@@ -99,12 +104,14 @@ It performs `preflight`, `build-router`, `prepare`, `start`, `smoke`,
 1. Copy and re-hash the fixed serialized trace.
 2. Start all four clean workers concurrently and wait for bounded health gates.
 3. Start the official router only after every worker is healthy.
-4. Send two unique, non-measured smoke requests through Prefill-to-Decode.
-5. Flush all four upstream caches. If any flush cannot be proven, relaunch only
+4. Send two unique, non-measured 32-token smoke requests through Prefill-to-Decode.
+5. Send one unique, non-measured natural-output 10,000-token probe and require
+   exact usage count plus `finish_reason=length`.
+6. Flush all four upstream caches. If any flush cannot be proven, relaunch only
    the exact run-owned router/workers and repeat readiness gates.
-6. Replay the trace once through an external no-GPU helper.
-7. Reject the run unless all request integrity and raw event-count gates pass.
-8. Capture redacted inspect records and logs, gracefully stop exact owned
+7. Replay the trace once through an external no-GPU helper.
+8. Reject the run unless all request integrity and raw-evidence gates pass.
+9. Capture redacted inspect records and logs, gracefully stop exact owned
    containers, verify ports, GPUs, and driver health, and generate the report.
 
 The worker and router obtain SGLang code only from the clean image. The modified
@@ -176,16 +183,20 @@ not a result.
 ## Metric interpretation
 
 The client uses `time.monotonic()` at HTTP request send and each non-empty
-stream event receive:
+stream event receive, and obtains the exact generated-token count from
+`usage.completion_tokens`:
 
 ```text
-TTFT = first_token_receive_time - request_start_time
-TPOT(i) = token_receive_time(i) - token_receive_time(i - 1)
+TTFT = first_nonempty_output_receive_time - request_start_time
+request_TPOT = (last_nonempty_output_receive_time - first_nonempty_output_receive_time)
+               / (usage.completion_tokens - 1)
 ```
 
-These are client-observed streaming timings. They are not GPU kernel duration
-or a direct internal Prefill/Decode stage duration. Worker timestamped logs are
-retained separately for later server-stage analysis.
+These are client-observed timings. `tpot_tokens.csv` retains transport-level
+SSE stream-event gaps for diagnosis; those rows are not individual tokens and
+must not be presented as per-token TPOT. None of these metrics is GPU kernel
+duration or a direct internal Prefill/Decode stage duration. Worker timestamped
+logs are retained separately for later server-stage analysis.
 
 This is one measured run. It is useful as a clean-upstream absolute baseline,
 but it does not establish run-to-run statistical significance and cannot by

@@ -14,7 +14,8 @@ from typing import Any, Iterable
 
 
 EXPECTED_IMAGE_ID = "sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e"
-EXPECTED_TRACE_SHA256 = "82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964"
+EXPECTED_TRACE_SHA256 = "c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d"
+EXPECTED_TPOT_SOURCE = "client_first_last_output_over_usage_completion_tokens"
 PROVENANCE_FIELDS = (
     "run_id",
     "image",
@@ -27,6 +28,8 @@ PROVENANCE_FIELDS = (
     "gpu_ids",
     "tp_size",
     "dp_size",
+    "output_contract",
+    "tpot_metric_source",
 )
 
 
@@ -86,6 +89,10 @@ def _validate_manifest(manifest: JsonDict) -> None:
         raise ValueError(f"unexpected trace_sha256: {manifest['trace_sha256']}")
     if manifest["topology"] != "1P3D" or manifest["tp_size"] != 4 or manifest["dp_size"] != 1:
         raise ValueError("manifest topology must be 1P3D with TP=4 and DP=1")
+    if manifest["output_contract"] != "natural":
+        raise ValueError("manifest output_contract must be natural")
+    if manifest["tpot_metric_source"] != EXPECTED_TPOT_SOURCE:
+        raise ValueError(f"manifest tpot_metric_source must be {EXPECTED_TPOT_SOURCE}")
 
 
 def _validate_requests(rows: list[JsonDict], expected_requests: int, expected_tokens: int) -> None:
@@ -101,9 +108,13 @@ def _validate_requests(rows: list[JsonDict], expected_requests: int, expected_to
     if any(int(row.get("completion_tokens") or -1) != expected_tokens for row in rows):
         raise ValueError(f"completion tokens must equal {expected_tokens}")
     if any(row.get("completion_token_match") is not True for row in rows):
-        raise ValueError("forced output does not match")
+        raise ValueError("completion token count does not match")
     if any(row.get("finish_reason") != "length" for row in rows):
         raise ValueError("finish reason must be length")
+    if any(row.get("tpot_metric_source") != EXPECTED_TPOT_SOURCE for row in rows):
+        raise ValueError(f"every request must use tpot_metric_source={EXPECTED_TPOT_SOURCE}")
+    if any(row.get("avg_tpot_s") is None or row.get("ttft_s") is None for row in rows):
+        raise ValueError("every request must contain client-observed TTFT and token-normalized TPOT")
 
 
 def _count_nonempty_lines(path: Path) -> int:
@@ -132,7 +143,7 @@ def _ttft_summary(rows: list[JsonDict]) -> JsonDict:
     return result
 
 
-def _tpot_summary(tpot_rows: list[JsonDict]) -> JsonDict:
+def _stream_event_gap_summary(tpot_rows: list[JsonDict]) -> JsonDict:
     values = [float(row["interval_s"]) for row in tpot_rows]
     good = sum(str(row.get("met", "")).lower() == "true" for row in tpot_rows)
     return {
@@ -196,7 +207,8 @@ def _write_markdown(path: Path, manifest: JsonDict, rows: list[JsonDict], summar
         "",
         "## Validity and boundary",
         "",
-        "This run passed the recorded artifact gates. TTFT and TPOT are client-observed streaming timings; they are not GPU kernel or internal Prefill/Decode stage durations.",
+        "This run passed the recorded artifact gates. TTFT and token-normalized request TPOT are client-observed timings; they are not GPU kernel or internal Prefill/Decode stage durations.",
+        "Primary TPOT is `(last nonempty output event - first nonempty output event) / (usage.completion_tokens - 1)`. The retained CSV contains SSE stream-event gaps, which are diagnostic transport events and are not one row per token.",
         "",
         f"- Run: `{manifest['run_id']}`",
         f"- Image ID: `{manifest['image_id']}`",
@@ -215,10 +227,11 @@ def _write_markdown(path: Path, manifest: JsonDict, rows: list[JsonDict], summar
         f"| TTFT mean (s) | {_fmt(summary['ttft']['all']['mean_s'])} |",
         f"| TTFT P95 (s) | {_fmt(summary['ttft']['all']['p95_s'])} |",
         f"| TTFT SLO attainment | {_fmt(summary['ttft']['all']['attainment'])} |",
-        f"| TPOT interval P50 (s) | {_fmt(summary['tpot_intervals']['p50_s'])} |",
-        f"| TPOT interval P95 (s) | {_fmt(summary['tpot_intervals']['p95_s'])} |",
-        f"| TPOT interval P99 (s) | {_fmt(summary['tpot_intervals']['p99_s'])} |",
-        f"| TPOT interval attainment | {_fmt(summary['tpot_intervals']['attainment'])} |",
+        f"| Request token-normalized TPOT mean (s) | {_fmt(summary['tpot_requests']['mean_s'])} |",
+        f"| Request token-normalized TPOT P95 (s) | {_fmt(summary['tpot_requests']['p95_s'])} |",
+        f"| Request token-normalized TPOT attainment | {_fmt(summary['tpot_requests']['attainment'])} |",
+        f"| SSE stream-event gap rows | {summary['stream_event_gap_rows']} |",
+        f"| SSE stream-event gap P95 (s) | {_fmt(summary['stream_event_gaps']['p95_s'])} |",
         "",
         "## Requests",
         "",
@@ -254,8 +267,6 @@ def generate_report(
     *,
     expected_requests: int = 40,
     expected_tokens: int = 10_000,
-    expected_ledger_rows: int = 400_040,
-    expected_tpot_rows: int = 399_960,
 ) -> JsonDict:
     run_dir = Path(run_dir)
     manifest = read_json(run_dir / "manifest.json")
@@ -267,11 +278,15 @@ def generate_report(
     if errors:
         raise ValueError(f"errors.jsonl must be empty, got {len(errors)} rows")
     ledger_rows = _count_nonempty_lines(run_dir / "raw" / "slo_ledger.jsonl")
-    if ledger_rows != expected_ledger_rows:
-        raise ValueError(f"ledger row count: expected {expected_ledger_rows}, got {ledger_rows}")
+    if ledger_rows < expected_requests * 2:
+        raise ValueError(f"ledger row count is too small: expected at least {expected_requests * 2}, got {ledger_rows}")
     tpot_rows = _read_tpot(raw / "tpot_tokens.csv")
-    if len(tpot_rows) != expected_tpot_rows:
-        raise ValueError(f"TPOT interval row count: expected {expected_tpot_rows}, got {len(tpot_rows)}")
+    if not tpot_rows:
+        raise ValueError("SSE stream-event gap evidence is empty")
+    gap_request_ids = {str(row.get("request_id") or "") for row in tpot_rows}
+    missing_gap_ids = sorted({str(row["request_id"]) for row in rows} - gap_request_ids)
+    if missing_gap_ids:
+        raise ValueError("missing SSE stream-event gap evidence for: " + ", ".join(missing_gap_ids))
 
     rows = sorted(rows, key=lambda row: (float(row.get("arrival_offset_s") or 0), str(row.get("request_id") or "")))
     request_tpot = stats(float(row["avg_tpot_s"]) for row in rows)
@@ -280,11 +295,12 @@ def generate_report(
         "valid": True,
         "requests": len(rows),
         "ledger_rows": ledger_rows,
-        "tpot_interval_rows": len(tpot_rows),
+        "stream_event_gap_rows": len(tpot_rows),
         "ttft": _ttft_summary(rows),
         "tpot_requests": request_tpot,
-        "tpot_intervals": _tpot_summary(tpot_rows),
-        "instrumentation": "client-observed streaming event times from time.monotonic()",
+        "stream_event_gaps": _stream_event_gap_summary(tpot_rows),
+        "tpot_metric_source": EXPECTED_TPOT_SOURCE,
+        "instrumentation": "client-observed streaming event times from time.monotonic(); usage.completion_tokens supplies token count",
         "limitation": "one measured run; no run-to-run statistical significance",
     }
     report_dir = run_dir / "report"

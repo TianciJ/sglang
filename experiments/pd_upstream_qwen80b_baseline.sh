@@ -13,13 +13,12 @@ fi
 
 IMAGE="tiancij/sglang-upstream:v0.5.15-clean"
 EXPECTED_IMAGE_ID="sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e"
-TRACE_SHA256="82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964"
-TRACE_SOURCE="${TRACE_SOURCE:-${REPO_ROOT}/pd-flip-artifacts/qwen80b-trace40-source/trace.jsonl}"
+TRACE_SHA256="c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d"
+SOURCE_TRACE_SHA256="82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964"
+TRACE_SOURCE="${TRACE_SOURCE:-${REPO_ROOT}/pd-flip-artifacts/qwen80b-trace40-natural/trace.jsonl}"
 TRACE_MANIFEST_SOURCE="${TRACE_MANIFEST_SOURCE:-$(dirname "${TRACE_SOURCE}")/manifest.json}"
 EXPECTED_REQUESTS=40
 EXPECTED_TOKENS=10000
-EXPECTED_LEDGER_ROWS=400040
-EXPECTED_TPOT_ROWS=399960
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-upstream-qwen80b-$(openssl rand -hex 3)}"
 RUN_DIR="${REMOTE_ARTIFACT_ROOT}/${RUN_ID}"
 HELPER_IMAGE="${HELPER_IMAGE:-${IMAGE}}"
@@ -69,7 +68,7 @@ dry_run() {
   echo "helper $(helper_name) mounts host helper code at /work/sglang read-only; no GPU"
   echo "worker/router source=/sgl-workspace/sglang from clean image; host source mount=none"
   echo "raw=slo_ledger.jsonl,request_metrics.jsonl,responses.jsonl,errors.jsonl,tpot_tokens.csv"
-  echo "validation=${EXPECTED_REQUESTS}/${EXPECTED_LEDGER_ROWS}/${EXPECTED_TPOT_ROWS} report=TTFT+TPOT"
+  echo "validation=${EXPECTED_REQUESTS} requests x ${EXPECTED_TOKENS} usage tokens; dynamic SSE event counts; report=TTFT+token-normalized-TPOT"
 }
 
 preflight() {
@@ -97,7 +96,7 @@ preflight() {
     ssh "${host}" "for gpu in ${gpu_list}; do test -z \"\$(nvidia-smi -i \"\$gpu\" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' || true)\" || { echo GPU \$gpu busy >&2; exit 1; }; done"
     ssh "${host}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${WORKER_PORT}|:${BOOTSTRAP_PORT})$'"
     ssh "${host}" "ibv_devinfo -d '${IB_DEVICE}' >/dev/null; show_gids | python3 -c \"import ipaddress,sys; rows=[x.split() for x in sys.stdin if x.startswith('${IB_DEVICE}')]; assert any(x[2]=='${MC_GID_INDEX}' and ipaddress.ip_address(x[3])==ipaddress.ip_address('${MOONCAKE_HOSTS[$index]}') for x in rows)\"; ip -6 addr show dev bond0 | grep -F '${MOONCAKE_HOSTS[$index]}/' >/dev/null"
-    ssh "${host}" "nvidia-smi -L; nvidia-smi --query-gpu=index,uuid,memory.total,memory.used --format=csv,noheader; df -h '${MODEL_PATH}' /var/lib/docker; docker ps --no-trunc; ps -eo pid,user,args --sort=pid | grep -E 'sglang|mooncake|sgl-router' | grep -v grep || true; ip -brief address; show_gids | grep -E '^${IB_DEVICE}[[:space:]]+1[[:space:]]+${MC_GID_INDEX}[[:space:]]+'; ibv_devinfo -d '${IB_DEVICE}' | sed -n '1,80p'; date --iso-8601=ns; chronyc tracking 2>/dev/null || true"
+    ssh "${host}" "docker_root=\$(docker info --format '{{.DockerRootDir}}'); nvidia-smi -L; nvidia-smi --query-gpu=index,uuid,memory.total,memory.used --format=csv,noheader; df -h '${MODEL_PATH}' \"\${docker_root}\"; docker ps --no-trunc; ps -eo pid,user,args --sort=pid | grep -E 'sglang|mooncake|sgl-router' | grep -v grep || true; ip -brief address; show_gids | grep -E '^${IB_DEVICE}[[:space:]]+1[[:space:]]+${MC_GID_INDEX}[[:space:]]+'; ibv_devinfo -d '${IB_DEVICE}' | sed -n '1,80p'; date --iso-8601=ns; chronyc tracking 2>/dev/null || true"
   done
   ssh "${SSH_HOSTS[0]}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${ROUTER_PORT})$'"
   echo "preflight passed; model_fingerprint=${expected_model}"
@@ -154,7 +153,7 @@ prepare() {
   ssh "${host}" "test \"\$(sha256sum '${RUN_DIR}/trace/trace.jsonl' | awk '{print \$1}')\" = '${TRACE_SHA256}'"
   router_sha="$(ssh "${host}" "sha256sum '${ROUTER_ARTIFACT_DIR}/sgl-router' | awk '{print \$1}'")"
   model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json' '${MODEL_PATH}/tokenizer.json'; find '${MODEL_PATH}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
-  ssh "${host}" "python3 -c \"import json; d={'run_id':'${RUN_ID}','mode':'upstream_baseline','validity':'pending','image':'${IMAGE}','image_id':'${EXPECTED_IMAGE_ID}','trace_sha256':'${TRACE_SHA256}','model_id':'${MODEL_ID}','model_fingerprint':'${model_hash}','router_sha256':'${router_sha}','topology':'1P3D','gpu_ids':'${GPU_IDS}','tp_size':${TP_SIZE},'dp_size':${DP_SIZE},'worker_port':${WORKER_PORT},'router_port':${ROUTER_PORT},'bootstrap_port':${BOOTSTRAP_PORT},'ib_device':'${IB_DEVICE}','mc_use_ipv6':${MC_USE_IPV6},'mc_gid_index':'${MC_GID_INDEX}','mooncake_hosts':['${MOONCAKE_HOSTS[0]}','${MOONCAKE_HOSTS[1]}','${MOONCAKE_HOSTS[2]}','${MOONCAKE_HOSTS[3]}'],'mooncake_metadata':'P2PHANDSHAKE','mem_fraction_static':${MEM_FRACTION_STATIC},'client_instrumentation':'time.monotonic streaming receive events'}; open('${RUN_DIR}/manifest.json','w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
+  ssh "${host}" "python3 -c \"import json; d={'run_id':'${RUN_ID}','mode':'upstream_baseline','validity':'pending','image':'${IMAGE}','image_id':'${EXPECTED_IMAGE_ID}','trace_sha256':'${TRACE_SHA256}','source_trace_sha256':'${SOURCE_TRACE_SHA256}','model_id':'${MODEL_ID}','model_fingerprint':'${model_hash}','router_sha256':'${router_sha}','topology':'1P3D','gpu_ids':'${GPU_IDS}','tp_size':${TP_SIZE},'dp_size':${DP_SIZE},'worker_port':${WORKER_PORT},'router_port':${ROUTER_PORT},'bootstrap_port':${BOOTSTRAP_PORT},'ib_device':'${IB_DEVICE}','mc_use_ipv6':${MC_USE_IPV6},'mc_gid_index':${MC_GID_INDEX},'mooncake_hosts':['${MOONCAKE_HOSTS[0]}','${MOONCAKE_HOSTS[1]}','${MOONCAKE_HOSTS[2]}','${MOONCAKE_HOSTS[3]}'],'mooncake_metadata':'P2PHANDSHAKE','mem_fraction_static':${MEM_FRACTION_STATIC},'output_contract':'natural','tpot_metric_source':'client_first_last_output_over_usage_completion_tokens','client_instrumentation':'time.monotonic streaming receive events plus usage.completion_tokens'}; open('${RUN_DIR}/manifest.json','w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
 }
 
 write_secret_env() {
@@ -175,8 +174,9 @@ test "$(docker image inspect "$image" --format '{{.Id}}')" = "$expected_image_id
 test -d /dev/infiniband
 docker run -d --name "$name" \
   --label tiancij.experiment=pd-upstream-qwen80b --label "tiancij.run_id=$run_id" \
-  --gpus "device=$gpus" --network host --ipc host --privileged \
+  --gpus "\"device=$gpus\"" --network host --ipc host --privileged \
   --env-file "$env_file" -e "CUDA_VISIBLE_DEVICES=$gpus" -e "MOONCAKE_LOCAL_HOSTNAME=$moon_host" \
+  -e "SGLANG_HOST_IP=$moon_host" \
   -e "MOONCAKE_PROTOCOL=$protocol" -e "MC_USE_IPV6=$use_ipv6" -e "MC_GID_INDEX=$gid" \
   -v "$model_path:$model_path:ro" -v /dev/infiniband:/dev/infiniband \
   "$image" bash -lc 'cd /sgl-workspace/sglang && exec python3 -m sglang.launch_server \
@@ -184,7 +184,7 @@ docker run -d --name "$name" \
     --tp-size '"$tp"' --dp-size '"$dp"' --disaggregation-mode '"$role"' \
     --disaggregation-transfer-backend mooncake --disaggregation-bootstrap-port '"$bootstrap"' \
     --disaggregation-ib-device '"$ib"' --mem-fraction-static '"$mem"' \
-    --enable-custom-logit-processor --enable-request-time-stats-logging \
+    --enable-request-time-stats-logging \
     --trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics \
     --admin-api-key "${ADMIN_API_KEY}"'
 REMOTE
@@ -248,14 +248,16 @@ source "$env_file"
 set +a
 python3 - "$router_port" "$model_id" "$run_id" "$run_dir" <<'PY'
 import json
+import hashlib
 import os
 import sys
+import time
 import urllib.request
 
 router_port, model_id, run_id, run_dir = sys.argv[1:]
 key = os.environ["ADMIN_API_KEY"]
 url = f"http://127.0.0.1:{router_port}/v1/chat/completions"
-base = {"model": model_id, "max_tokens": 8, "stream": False, "ignore_eos": True}
+base = {"model": model_id, "max_tokens": 32, "stream": False, "ignore_eos": True}
 for index in range(2):
     body = dict(
         base,
@@ -277,6 +279,78 @@ for index in range(2):
     with open(f"{run_dir}/smoke/response-{index}.json", "w", encoding="utf-8") as handle:
         json.dump(output, handle)
         handle.write("\n")
+
+probe_body = {
+    "model": model_id,
+    "messages": [
+        {
+            "role": "user",
+            "content": f"upstream-natural-10k-probe-{run_id}-never-in-formal-trace. Continue writing plain text without stopping.",
+        }
+    ],
+    "max_tokens": 10000,
+    "stream": True,
+    "stream_options": {"include_usage": True},
+    "ignore_eos": True,
+    "stop": None,
+    "temperature": 0,
+}
+probe_request = urllib.request.Request(
+    url,
+    data=json.dumps(probe_body).encode(),
+    headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+)
+started = time.monotonic()
+first_output = None
+last_output = None
+output_events = 0
+output_bytes = 0
+digest = hashlib.sha256()
+completion_tokens = None
+finish_reason = None
+with urllib.request.urlopen(probe_request, timeout=7200) as response:
+    for raw_line in response:
+        line = raw_line.decode("utf-8").strip()
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        event = json.loads(line[6:])
+        usage = event.get("usage") or {}
+        if usage.get("completion_tokens") is not None:
+            completion_tokens = int(usage["completion_tokens"])
+        choices = event.get("choices") or []
+        if choices and choices[0].get("finish_reason") is not None:
+            finish_reason = choices[0]["finish_reason"]
+        content = ""
+        if choices:
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content") or ""
+        if content:
+            now = time.monotonic()
+            if first_output is None:
+                first_output = now
+            last_output = now
+            output_events += 1
+            encoded = content.encode("utf-8")
+            output_bytes += len(encoded)
+            digest.update(encoded)
+completion_tokens = int(completion_tokens or -1)
+assert completion_tokens == 10000, completion_tokens
+assert finish_reason == "length", finish_reason
+assert first_output is not None and last_output is not None and output_events > 0
+probe_summary = {
+    "completion_tokens": completion_tokens,
+    "finish_reason": finish_reason,
+    "output_events": output_events,
+    "output_bytes": output_bytes,
+    "output_sha256": digest.hexdigest(),
+    "ttft_s": first_output - started,
+    "output_span_s": last_output - first_output,
+    "token_normalized_tpot_s": (last_output - first_output) / (completion_tokens - 1),
+    "metric_source": "client_first_last_output_over_usage_completion_tokens",
+}
+with open(f"{run_dir}/smoke/natural-10k-probe.json", "w", encoding="utf-8") as handle:
+    json.dump(probe_summary, handle, indent=2, sort_keys=True)
+    handle.write("\n")
 PY
 REMOTE
   local flush_ok=1 flush_response
@@ -321,7 +395,8 @@ docker run --name "$name" --network host --env-file "$run_dir/helper.env" \
   "$image" bash -lc 'cd /work/sglang && exec python3 scripts/playground/disaggregation/pd_flip_trace_replay.py replay \
     --trace-jsonl /run/trace/trace.jsonl --router-url http://127.0.0.1:'"$router_port"' \
     --mode upstream_baseline --output-dir /run/raw --ledger-path /run/raw/slo_ledger.jsonl \
-    --timeout-seconds '"$timeout"' --max-workers 40 --api-key "${ADMIN_API_KEY}"' \
+    --timeout-seconds '"$timeout"' --max-workers 40 \
+    --api-key "${ADMIN_API_KEY}"' \
   >"$run_dir/logs/client.log" 2>&1
 docker inspect "$name" | sed -E 's/(ADMIN_API_KEY=)[^"]+/\1<redacted>/g' >"$run_dir/inspect/helper.json"
 docker rm "$name" >/dev/null
@@ -331,7 +406,7 @@ REMOTE
 
 validate_raw() {
   local host="${SSH_HOSTS[0]}"
-  ssh "${host}" "python3 -c \"import csv,json; from pathlib import Path; root=Path('${RUN_DIR}/raw'); mode=root/'upstream_baseline'; rows=[json.loads(x) for x in (mode/'request_metrics.jsonl').read_text().splitlines() if x.strip()]; ids=[x['request_id'] for x in rows]; errors=[x for x in (mode/'errors.jsonl').read_text().splitlines() if x.strip()]; ledger=sum(1 for x in (root/'slo_ledger.jsonl').open() if x.strip()); tpot=sum(1 for _ in csv.DictReader((mode/'tpot_tokens.csv').open())); assert len(rows)==${EXPECTED_REQUESTS}; assert len(set(ids))==${EXPECTED_REQUESTS}; assert not errors; assert all(x.get('status')=='completed' and x.get('completion_tokens')==${EXPECTED_TOKENS} and x.get('completion_token_match') is True and x.get('finish_reason')=='length' for x in rows); assert ledger==${EXPECTED_LEDGER_ROWS}, ledger; assert tpot==${EXPECTED_TPOT_ROWS}, tpot\""
+  ssh "${host}" "python3 -c \"import csv,json; from pathlib import Path; root=Path('${RUN_DIR}/raw'); mode=root/'upstream_baseline'; rows=[json.loads(x) for x in (mode/'request_metrics.jsonl').read_text().splitlines() if x.strip()]; ids=[x['request_id'] for x in rows]; errors=[x for x in (mode/'errors.jsonl').read_text().splitlines() if x.strip()]; ledger=sum(1 for x in (root/'slo_ledger.jsonl').open() if x.strip()); gaps=list(csv.DictReader((mode/'tpot_tokens.csv').open())); expected_source='client_first_last_output_over_usage_completion_tokens'; assert len(rows)==${EXPECTED_REQUESTS}; assert len(set(ids))==${EXPECTED_REQUESTS}; assert not errors; assert all(x.get('status')=='completed' and x.get('completion_tokens')==${EXPECTED_TOKENS} and x.get('completion_token_match') is True and x.get('finish_reason')=='length' and x.get('tpot_metric_source')==expected_source and x.get('avg_tpot_s') is not None and x.get('ttft_s') is not None for x in rows); assert ledger>=${EXPECTED_REQUESTS}*2, ledger; assert gaps; assert set(ids)<=set(x['request_id'] for x in gaps)\""
 }
 
 safe_stop_container() {
@@ -341,7 +416,10 @@ set -euo pipefail
 name="$1"; run_id="$2"
 if ! docker inspect "$name" >/dev/null 2>&1; then exit 0; fi
 test "$(docker inspect "$name" --format '{{index .Config.Labels "tiancij.run_id"}}')" = "$run_id"
-docker stop --time 1800 "$name" >/dev/null
+status="$(docker inspect "$name" --format '{{.State.Status}}')"
+case "$status" in
+  running|paused|restarting) docker stop --time 1800 "$name" >/dev/null ;;
+esac
 docker rm "${name}" >/dev/null
 REMOTE
 }

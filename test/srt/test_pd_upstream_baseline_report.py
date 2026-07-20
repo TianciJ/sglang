@@ -36,7 +36,7 @@ def make_run(root: Path) -> Path:
         "validity": "pending",
         "image": "tiancij/sglang-upstream:v0.5.15-clean",
         "image_id": "sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e",
-        "trace_sha256": "82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964",
+        "trace_sha256": "c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d",
         "model_id": "Qwen3-Next-80B-A3B-Instruct",
         "model_fingerprint": "model-sha",
         "router_sha256": "router-sha",
@@ -44,6 +44,8 @@ def make_run(root: Path) -> Path:
         "gpu_ids": "0,1,2,3",
         "tp_size": 4,
         "dp_size": 1,
+        "output_contract": "natural",
+        "tpot_metric_source": "client_first_last_output_over_usage_completion_tokens",
     }
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     rows = [
@@ -59,6 +61,7 @@ def make_run(root: Path) -> Path:
             "ttft_slo_s": 5.0,
             "ttft_met": True,
             "avg_tpot_s": 0.03,
+            "tpot_metric_source": "client_first_last_output_over_usage_completion_tokens",
             "p50_tpot_s": 0.03,
             "p95_tpot_s": 0.04,
             "max_tpot_s": 0.04,
@@ -78,6 +81,7 @@ def make_run(root: Path) -> Path:
             "ttft_slo_s": 2.0,
             "ttft_met": False,
             "avg_tpot_s": 0.055,
+            "tpot_metric_source": "client_first_last_output_over_usage_completion_tokens",
             "p50_tpot_s": 0.04,
             "p95_tpot_s": 0.07,
             "max_tpot_s": 0.07,
@@ -111,20 +115,22 @@ def test_generates_valid_summary_and_client_observed_report(tmp_path):
     module = load_module()
     run = make_run(tmp_path)
 
-    summary = module.generate_report(
-        run, expected_requests=2, expected_tokens=3, expected_ledger_rows=8, expected_tpot_rows=4
-    )
+    summary = module.generate_report(run, expected_requests=2, expected_tokens=3)
 
     assert summary["valid"] is True
     assert summary["ttft"]["all"]["mean_s"] == pytest.approx(3.5)
     assert summary["ttft"]["all"]["attainment"] == pytest.approx(0.5)
     assert summary["ttft"]["long"]["attainment"] == pytest.approx(1.0)
-    assert summary["tpot_intervals"]["p50_s"] == pytest.approx(0.04)
-    assert summary["tpot_intervals"]["p95_s"] == pytest.approx(0.07)
-    assert summary["tpot_intervals"]["attainment"] == pytest.approx(0.75)
+    assert summary["stream_event_gaps"]["p50_s"] == pytest.approx(0.04)
+    assert summary["stream_event_gaps"]["p95_s"] == pytest.approx(0.07)
+    assert summary["stream_event_gaps"]["attainment"] == pytest.approx(0.75)
+    assert summary["tpot_requests"]["mean_s"] == pytest.approx(0.0425)
+    assert summary["tpot_metric_source"] == "client_first_last_output_over_usage_completion_tokens"
     report = (run / "report" / "report.md").read_text(encoding="utf-8")
     assert "client-observed" in report
     assert "one measured run" in report
+    assert "token-normalized" in report
+    assert "stream-event gap" in report
     assert "qwen80b-00" in (run / "report" / "ttft_scatter.svg").read_text(encoding="utf-8")
     assert "qwen80b-01" in (run / "report" / "tpot_scatter.svg").read_text(encoding="utf-8")
 
@@ -135,7 +141,7 @@ def test_generates_valid_summary_and_client_observed_report(tmp_path):
         (lambda rows: rows[1].update(request_id=rows[0]["request_id"]), "duplicate request IDs"),
         (lambda rows: rows[0].update(status="failed"), "not completed"),
         (lambda rows: rows[0].update(completion_tokens=2), "completion tokens"),
-        (lambda rows: rows[0].update(completion_token_match=False), "forced output"),
+        (lambda rows: rows[0].update(completion_token_match=False), "completion token count"),
         (lambda rows: rows[0].update(finish_reason="stop"), "finish reason"),
     ],
 )
@@ -148,9 +154,7 @@ def test_rejects_request_integrity_failures(tmp_path, mutation, message):
     write_jsonl(path, rows)
 
     with pytest.raises(ValueError, match=message):
-        module.generate_report(
-            run, expected_requests=2, expected_tokens=3, expected_ledger_rows=8, expected_tpot_rows=4
-        )
+        module.generate_report(run, expected_requests=2, expected_tokens=3)
 
 
 def test_rejects_nonempty_errors_and_raw_row_count_mismatch(tmp_path):
@@ -159,15 +163,24 @@ def test_rejects_nonempty_errors_and_raw_row_count_mismatch(tmp_path):
     write_jsonl(run / "raw" / "upstream_baseline" / "errors.jsonl", [{"error": "boom"}])
 
     with pytest.raises(ValueError, match="errors.jsonl"):
-        module.generate_report(
-            run, expected_requests=2, expected_tokens=3, expected_ledger_rows=8, expected_tpot_rows=4
-        )
+        module.generate_report(run, expected_requests=2, expected_tokens=3)
 
     write_jsonl(run / "raw" / "upstream_baseline" / "errors.jsonl", [])
-    with pytest.raises(ValueError, match="ledger row count"):
-        module.generate_report(
-            run, expected_requests=2, expected_tokens=3, expected_ledger_rows=9, expected_tpot_rows=4
-        )
+    summary = module.generate_report(run, expected_requests=2, expected_tokens=3)
+    assert summary["ledger_rows"] == 8
+    assert summary["stream_event_gap_rows"] == 4
+
+
+def test_rejects_missing_natural_output_tpot_source(tmp_path):
+    module = load_module()
+    run = make_run(tmp_path)
+    path = run / "raw" / "upstream_baseline" / "request_metrics.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    del rows[0]["tpot_metric_source"]
+    write_jsonl(path, rows)
+
+    with pytest.raises(ValueError, match="tpot_metric_source"):
+        module.generate_report(run, expected_requests=2, expected_tokens=3)
 
 
 def test_rejects_missing_provenance(tmp_path):
@@ -178,6 +191,4 @@ def test_rejects_missing_provenance(tmp_path):
     (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="router_sha256"):
-        module.generate_report(
-            run, expected_requests=2, expected_tokens=3, expected_ledger_rows=8, expected_tpot_rows=4
-        )
+        module.generate_report(run, expected_requests=2, expected_tokens=3)

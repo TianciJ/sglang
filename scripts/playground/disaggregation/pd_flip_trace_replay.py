@@ -477,6 +477,43 @@ def compute_metrics(
     }
 
 
+def _apply_natural_output_tpot(
+    metrics: JsonDict,
+    *,
+    first_output_monotonic: Optional[float],
+    last_output_monotonic: Optional[float],
+    completion_tokens: Optional[int],
+) -> None:
+    metrics["avg_stream_event_gap_s"] = metrics.get("avg_tpot_s")
+    metrics["p50_stream_event_gap_s"] = metrics.get("p50_tpot_s")
+    metrics["p95_stream_event_gap_s"] = metrics.get("p95_tpot_s")
+    metrics["max_stream_event_gap_s"] = metrics.get("max_tpot_s")
+    if (
+        first_output_monotonic is None
+        or last_output_monotonic is None
+        or not isinstance(completion_tokens, int)
+        or completion_tokens <= 1
+    ):
+        metrics["token_normalized_tpot_s"] = None
+        metrics["tpot_metric_source"] = (
+            "client_first_last_output_over_usage_completion_tokens"
+        )
+        metrics["avg_tpot_s"] = None
+        metrics["tpot_avg_met"] = False
+        metrics["all_met"] = False
+        return
+    value = max(0.0, last_output_monotonic - first_output_monotonic) / (
+        completion_tokens - 1
+    )
+    metrics["token_normalized_tpot_s"] = value
+    metrics["tpot_metric_source"] = (
+        "client_first_last_output_over_usage_completion_tokens"
+    )
+    metrics["avg_tpot_s"] = value
+    metrics["tpot_avg_met"] = value <= float(metrics["tpot_slo_s"])
+    metrics["all_met"] = bool(metrics.get("ttft_met")) and metrics["tpot_avg_met"]
+
+
 def _percentile_nearest_rank(values: Sequence[float], percentile: float) -> float:
     if not values:
         raise ValueError("values must not be empty")
@@ -507,7 +544,6 @@ def replay_trace(
     run_started_wall = time.time()
     futures = []
     max_workers = max(1, max_workers)
-
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for record in trace:
             scheduled = run_started_monotonic + float(record["arrival_offset_s"])
@@ -704,6 +740,13 @@ def _send_one_request(
     )
     metrics.update(evidence)
     metrics["finish_reason_match"] = finish_reason == "length"
+    if forced_text is None:
+        _apply_natural_output_tpot(
+            metrics,
+            first_output_monotonic=first_token_monotonic,
+            last_output_monotonic=token_times[-1] if token_times else None,
+            completion_tokens=usage_completion_tokens,
+        )
 
     response_record = {
         "request_id": record["request_id"],

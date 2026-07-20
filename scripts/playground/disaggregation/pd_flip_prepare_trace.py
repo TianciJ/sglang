@@ -72,6 +72,31 @@ def apply_output_contract(
     custom_params["forced_token_id"] = forced_token_id
 
 
+def apply_natural_output_contract(
+    row: dict[str, Any], *, max_tokens: int, model: str | None = None
+) -> None:
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    body = row.setdefault("body", {})
+    if model is not None:
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be nonempty")
+        row["model"] = model
+        body["model"] = model
+    row["max_tokens"] = max_tokens
+    row["stream"] = True
+    body["max_tokens"] = max_tokens
+    body["temperature"] = 0.0
+    body["stream"] = True
+    body["ignore_eos"] = True
+    body["stop"] = None
+    body["stream_options"] = {"include_usage": True}
+    body.pop("custom_logit_processor", None)
+    custom_params = body.setdefault("custom_params", {})
+    custom_params.pop("forced_text", None)
+    custom_params.pop("forced_token_id", None)
+
+
 def _validate_trace(rows: list[dict[str, Any]]) -> None:
     if len(rows) != 40:
         raise ValueError(f"expected 40 requests, got {len(rows)}")
@@ -139,6 +164,32 @@ def _validate_output_contract(
             raise ValueError(f"request {index} forced_token_id mismatch")
 
 
+def _validate_natural_output_contract(
+    rows: list[dict[str, Any]], *, max_tokens: int, model: str | None = None
+) -> None:
+    for index, row in enumerate(rows):
+        body = row.get("body") or {}
+        custom_params = body.get("custom_params") or {}
+        if model is not None and (
+            row.get("model") != model or body.get("model") != model
+        ):
+            raise ValueError(f"request {index} model contract mismatch")
+        if row.get("max_tokens") != max_tokens or body.get("max_tokens") != max_tokens:
+            raise ValueError(f"request {index} max_tokens contract mismatch")
+        if row.get("stream") is not True or body.get("stream") is not True:
+            raise ValueError(f"request {index} must use streaming")
+        if body.get("temperature") != 0.0:
+            raise ValueError(f"request {index} temperature contract mismatch")
+        if body.get("ignore_eos") is not True or body.get("stop") is not None:
+            raise ValueError(f"request {index} EOS/stop contract mismatch")
+        if body.get("stream_options") != {"include_usage": True}:
+            raise ValueError(f"request {index} must request streaming usage")
+        if "custom_logit_processor" in body:
+            raise ValueError(f"request {index} must not use custom_logit_processor")
+        if "forced_text" in custom_params or "forced_token_id" in custom_params:
+            raise ValueError(f"request {index} must not use forced sampling fields")
+
+
 def prepare_trace(
     source: Path,
     output: Path,
@@ -153,6 +204,7 @@ def prepare_trace(
     forced_token_id: int | None = None,
     custom_logit_processor: str | None = None,
     model: str | None = None,
+    natural_output: bool = False,
 ) -> None:
     if wave_size <= 0:
         raise ValueError("wave_size must be positive")
@@ -184,16 +236,21 @@ def prepare_trace(
                 .setdefault("pd_flip_slo", {})["tpot_seconds"]
             ) = tpot_slo_override_seconds
         if max_tokens is not None:
-            apply_output_contract(
-                scheduled,
-                max_tokens=max_tokens,
-                forced_text=forced_text or "",
-                forced_token_id=(
-                    forced_token_id if forced_token_id is not None else -1
-                ),
-                custom_logit_processor=custom_logit_processor or "",
-                model=model,
-            )
+            if natural_output:
+                apply_natural_output_contract(
+                    scheduled, max_tokens=max_tokens, model=model
+                )
+            else:
+                apply_output_contract(
+                    scheduled,
+                    max_tokens=max_tokens,
+                    forced_text=forced_text or "",
+                    forced_token_id=(
+                        forced_token_id if forced_token_id is not None else -1
+                    ),
+                    custom_logit_processor=custom_logit_processor or "",
+                    model=model,
+                )
         scheduled_rows.append(scheduled)
 
     if any(
@@ -212,14 +269,21 @@ def prepare_trace(
     reloaded = _load_jsonl(output)
     _validate_trace(reloaded)
     if max_tokens is not None:
-        _validate_output_contract(
-            reloaded,
-            max_tokens=max_tokens,
-            forced_text=forced_text or "",
-            forced_token_id=(forced_token_id if forced_token_id is not None else -1),
-            custom_logit_processor=custom_logit_processor or "",
-            model=model,
-        )
+        if natural_output:
+            _validate_natural_output_contract(
+                reloaded, max_tokens=max_tokens, model=model
+            )
+        else:
+            _validate_output_contract(
+                reloaded,
+                max_tokens=max_tokens,
+                forced_text=forced_text or "",
+                forced_token_id=(
+                    forced_token_id if forced_token_id is not None else -1
+                ),
+                custom_logit_processor=custom_logit_processor or "",
+                model=model,
+            )
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         json.dumps(
@@ -238,6 +302,7 @@ def prepare_trace(
                 "max_tokens": max_tokens,
                 "forced_text": forced_text,
                 "forced_token_id": forced_token_id,
+                "output_contract": "natural" if natural_output else "forced",
                 "model": model,
             },
             indent=2,
@@ -259,8 +324,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ttft-slo-override-seconds", type=float, default=0.0)
     parser.add_argument("--tpot-slo-override-seconds", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, required=True)
-    parser.add_argument("--forced-text", required=True)
-    parser.add_argument("--tokenizer-path", type=Path, required=True)
+    parser.add_argument("--forced-text")
+    parser.add_argument("--tokenizer-path", type=Path)
+    parser.add_argument("--natural-output", action="store_true")
     parser.add_argument("--model", required=True)
     return parser
 
@@ -268,6 +334,25 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.natural_output:
+        prepare_trace(
+            source=args.source,
+            output=args.output,
+            manifest=args.manifest,
+            wave_size=args.wave_size,
+            wave_gap_seconds=args.wave_gap_seconds,
+            intra_wave_interval_seconds=args.intra_wave_interval_seconds,
+            ttft_slo_override_seconds=args.ttft_slo_override_seconds,
+            tpot_slo_override_seconds=args.tpot_slo_override_seconds,
+            max_tokens=args.max_tokens,
+            model=args.model,
+            natural_output=True,
+        )
+        return
+
+    if args.forced_text is None or args.tokenizer_path is None:
+        parser.error("forced mode requires --forced-text and --tokenizer-path")
 
     from transformers import AutoTokenizer
 

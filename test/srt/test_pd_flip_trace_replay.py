@@ -8,6 +8,36 @@ from unittest.mock import patch
 
 
 class PDFlipTraceReplayTest(unittest.TestCase):
+    def test_natural_output_tpot_uses_usage_token_count_not_sse_event_count(self):
+        from scripts.playground.disaggregation.pd_flip_trace_replay import (
+            _apply_natural_output_tpot,
+        )
+
+        metrics = {
+            "avg_tpot_s": 0.45,
+            "p50_tpot_s": 0.4,
+            "p95_tpot_s": 0.5,
+            "max_tpot_s": 0.5,
+            "tpot_slo_s": 0.05,
+            "ttft_met": True,
+        }
+        _apply_natural_output_tpot(
+            metrics,
+            first_output_monotonic=10.0,
+            last_output_monotonic=10.9,
+            completion_tokens=10,
+        )
+
+        self.assertAlmostEqual(metrics["avg_tpot_s"], 0.1)
+        self.assertAlmostEqual(metrics["token_normalized_tpot_s"], 0.1)
+        self.assertEqual(metrics["avg_stream_event_gap_s"], 0.45)
+        self.assertEqual(
+            metrics["tpot_metric_source"],
+            "client_first_last_output_over_usage_completion_tokens",
+        )
+        self.assertFalse(metrics["tpot_avg_met"])
+        self.assertFalse(metrics["all_met"])
+
     def test_send_one_request_persists_cache_and_token_timestamps(self):
         from scripts.playground.disaggregation.pd_flip_trace_replay import (
             _send_one_request,
