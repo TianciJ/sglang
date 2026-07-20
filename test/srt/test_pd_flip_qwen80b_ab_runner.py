@@ -49,6 +49,7 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             "MODEL_PATH=/models/Qwen3-Next-80B-A3B-Instruct",
             "TP_SIZE=4",
             "DP_SIZE=1",
+            "IB_DEVICE=mlx5_bond_1",
             "MC_GID_INDEX=3",
             "TRACE_REQUESTS=40",
             "TRACE_MAX_TOKENS=10000",
@@ -66,6 +67,8 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             "COMPILE_CACHE_ROOT=/home/tiancij/sglang-compile-cache",
         ):
             self.assertIn(value, source)
+        runner_source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn('IB_DEVICE="${IB_DEVICE:-mlx5_bond_1}"', runner_source)
 
     def test_runner_has_separate_clean_baseline_and_state_machine_launches(self):
         source = RUNNER.read_text(encoding="utf-8")
