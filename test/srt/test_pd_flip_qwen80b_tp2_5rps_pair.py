@@ -31,13 +31,17 @@ class TP2FiveRPSPairRunnerTest(unittest.TestCase):
             source.index('"${STATE_RUNNER}" state-machine'),
         )
         for expected in (
-            "d82d0f7fc5b745f43a48d6d91451794887b4a3f2e5f049d6e7a30a38652c9508",
+            "TRACE_SHA256",
             "TRACE_LONG_TTFT_SLO_SECONDS",
             "TRACE_SHORT_TTFT_SLO_SECONDS",
             'controller.get("final_topology") == "2P2D"',
             'controller.get("first_migration_ratio") == 0.5',
             'controller.get("observation_seconds") == 2.0',
             'observer.get("first_trigger")',
+            "write_pair_design",
+            "validate_pair_provenance",
+            '"model_fingerprint"',
+            '"mooncake_hosts"',
         ):
             self.assertIn(expected, source)
         self.assertIn("TRACE_INTERVAL_SECONDS=0.2", pair_env_source)
