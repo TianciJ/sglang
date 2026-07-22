@@ -426,9 +426,39 @@ df -Pk {artifact_root} {model} | tail -n +2
         if result.returncode or not Path(required_path).is_file():
             raise RuntimeError("{} helper failed".format(component))
 
+    def require_observer_trigger(self):
+        summary_path = Path(self.run_dir, "observer", "summary.json")
+        summary = json.loads(summary_path.read_text())
+        if summary.get("first_trigger") is not None:
+            return
+
+        failure = {
+            "valid": False,
+            "reason": "observer_completed_without_slo_trigger",
+            "request_count": 40,
+            "first_trigger": None,
+        }
+        Path(self.run_dir, "status", "invalid.json").write_text(
+            json.dumps(failure, indent=2, sort_keys=True) + "\n"
+        )
+        name = self.helper_name("controller")
+        self.coordinator(
+            "if docker inspect {0} >/dev/null 2>&1; then "
+            "state=$(docker inspect {0} --format '{{{{.State.Status}}}}'); "
+            "case \"$state\" in running|paused|restarting) docker stop --time 60 {0} >/dev/null;; esac; "
+            "docker logs --timestamps {0} > {1} 2>&1 || true; "
+            "docker rm {0} >/dev/null 2>&1 || true; fi".format(
+                self.q(name),
+                self.q(self.run_dir + "/logs/controller.docker.log"),
+            ),
+            check=False,
+            timeout=120,
+        )
+        raise RuntimeError("observer completed without an SLO trigger")
+
     def stop_sampler(self):
         name = self.helper_name("sampler")
-        self.coordinator("docker inspect {0} >/dev/null 2>&1 || exit 0; state=$(docker inspect {0} --format '{{{{.State.Status}}}}'); if test \"$state\" = running; then docker kill --signal=INT {0} >/dev/null; fi; for i in $(seq 1 60); do state=$(docker inspect {0} --format '{{{{.State.Status}}}}' 2>/dev/null || true); test \"$state\" != running && break; sleep 1; done; docker logs --timestamps {0} > {1} 2>&1 || true; docker rm {0} >/dev/null".format(
+        self.coordinator("docker inspect {0} >/dev/null 2>&1 || exit 0; state=$(docker inspect {0} --format '{{{{.State.Status}}}}'); case \"$state\" in running|paused|restarting) docker stop --time 60 {0} >/dev/null;; esac; docker logs --timestamps {0} > {1} 2>&1 || true; docker rm {0} >/dev/null".format(
             self.q(name), self.q(self.run_dir + "/logs/sampler.docker.log")), timeout=120)
 
     def validate(self):
@@ -472,7 +502,7 @@ df -Pk {artifact_root} {model} | tail -n +2
         for component in ("warmup", "observer", "controller", "sampler"):
             name = self.helper_name(component)
             if component == "sampler":
-                command = "docker inspect {0} >/dev/null 2>&1 || exit 0; state=$(docker inspect {0} --format '{{{{.State.Status}}}}'); if test \"$state\" = running; then docker kill --signal=INT {0} >/dev/null; fi; docker rm {0} >/dev/null 2>&1 || true".format(self.q(name))
+                command = "docker inspect {0} >/dev/null 2>&1 || exit 0; state=$(docker inspect {0} --format '{{{{.State.Status}}}}'); case \"$state\" in running|paused|restarting) docker stop --time 60 {0} >/dev/null;; esac; docker rm {0} >/dev/null 2>&1 || true".format(self.q(name))
             else:
                 command = "if docker inspect {0} >/dev/null 2>&1; then state=$(docker inspect {0} --format '{{{{.State.Status}}}}'); case \"$state\" in running|paused|restarting) docker stop --time 300 {0} >/dev/null;; esac; docker rm {0} >/dev/null 2>&1 || true; fi".format(self.q(name))
             self.coordinator(command, check=False, timeout=360)
@@ -568,6 +598,7 @@ df -Pk {artifact_root} {model} | tail -n +2
             self.start_helpers()
             self.replay()
             self.wait_helper("observer", self.run_dir + "/observer/summary.json")
+            self.require_observer_trigger()
             self.wait_helper("controller", self.run_dir + "/controller/result.json")
             self.stop_sampler()
             self.validate()

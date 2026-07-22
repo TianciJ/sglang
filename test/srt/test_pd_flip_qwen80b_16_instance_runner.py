@@ -56,19 +56,44 @@ class Qwen80B16InstanceRunnerTest(unittest.TestCase):
         self.assertEqual(runner.target_name, "h3i3")
         self.assertEqual(len(runner.node_args()) // 2, 16)
 
+    def test_completed_observer_without_trigger_stops_exact_controller(self):
+        runner = self.build_runner()
+        with tempfile.TemporaryDirectory() as directory:
+            runner.run_dir = directory
+            (Path(directory) / "observer").mkdir()
+            (Path(directory) / "status").mkdir()
+            (Path(directory) / "logs").mkdir()
+            (Path(directory) / "observer" / "summary.json").write_text(
+                '{"first_trigger": null}\n', encoding="utf-8"
+            )
+            commands = []
+            runner.coordinator = lambda command, **kwargs: commands.append(command)
+
+            with self.assertRaisesRegex(
+                RuntimeError, "observer completed without an SLO trigger"
+            ):
+                runner.require_observer_trigger()
+
+            invalid = (Path(directory) / "status" / "invalid.json").read_text()
+            self.assertIn("observer_completed_without_slo_trigger", invalid)
+            self.assertEqual(len(commands), 1)
+            self.assertIn(runner.helper_name("controller"), commands[0])
+            self.assertIn("docker stop --time 60", commands[0])
+
     def test_runner_has_no_forbidden_or_broad_cleanup(self):
         source = SCRIPT.read_text(encoding="utf-8")
 
         for forbidden in (
             "docker restart",
             "docker rm -f",
+            "docker kill",
             "pkill",
             "killall",
             "kill -9",
         ):
             self.assertNotIn(forbidden, source)
         self.assertIn("self.run_id", source)
-        self.assertIn("docker kill --signal=INT", source)
+        self.assertIn("observer completed without an SLO trigger", source)
         self.assertIn("1P15D", source)
         self.assertIn("2P14D", source)
 
