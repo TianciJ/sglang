@@ -1,5 +1,11 @@
 # Qwen3-Next 80B PD Flip A/B quick-validation runbook
 
+> **Current TP=2 / 5 req/s procedure:** for the successfully validated
+> four-node workflow, use
+> [pd_flip_qwen80b_tp2_5rps_success.md](pd_flip_qwen80b_tp2_5rps_success.md).
+> The historical parameters below include older TP=4, waved-arrival, and
+> forced-output experiments and must not be copied into that workflow.
+
 This runbook compares the same deterministic 40-request workload on two four-node configurations:
 
 - Baseline: stock static SGLang `1P3D`.
