@@ -53,11 +53,12 @@ validate_pair_config() {
   [[ -r "${UPSTREAM_ENV_FILE}" && -r "${STATE_ENV_FILE}" ]] || die "private mode env file is missing"
   validate_trace
   local key left right
-  for key in MODEL_PATH MODEL_ID GPU_IDS TP_SIZE DP_SIZE MEM_FRACTION_STATIC IB_DEVICE MC_GID_INDEX MC_USE_IPV6 NODE0_IP NODE1_IP NODE2_IP NODE3_IP NODE0_MOONCAKE_HOST NODE1_MOONCAKE_HOST NODE2_MOONCAKE_HOST NODE3_MOONCAKE_HOST; do
+  for key in MODEL_PATH MODEL_ID GPU_IDS TP_SIZE DP_SIZE MEM_FRACTION_STATIC IB_DEVICE MC_GID_INDEX MC_USE_IPV6 ROUTER_PORT BOOTSTRAP_PORT NODE0_IP NODE1_IP NODE2_IP NODE3_IP NODE0_MOONCAKE_HOST NODE1_MOONCAKE_HOST NODE2_MOONCAKE_HOST NODE3_MOONCAKE_HOST; do
     left="$(env_value "${UPSTREAM_ENV_FILE}" "${key}")"
     right="$(env_value "${STATE_ENV_FILE}" "${key}")"
     [[ -n "${left}" && "${left}" == "${right}" ]] || die "mode config mismatch for ${key}: ${left} != ${right}"
   done
+  [[ "$(env_value "${UPSTREAM_ENV_FILE}" WORKER_PORT)" == "$(env_value "${STATE_ENV_FILE}" PORT)" ]] || die "mode config mismatch for worker port"
   [[ "$(env_value "${UPSTREAM_ENV_FILE}" GPU_IDS)" == "0,1" ]] || die "this run requires GPUs 0,1"
   [[ "$(env_value "${UPSTREAM_ENV_FILE}" TP_SIZE)" == "2" ]] || die "this run requires TP=2"
   [[ "${TRACE_INTERVAL_SECONDS}" == "0.2" ]] || die "arrival interval must be 0.2 seconds"
@@ -144,12 +145,16 @@ write_pair_design() {
     "$(env_value "${UPSTREAM_ENV_FILE}" NODE0_MOONCAKE_HOST)" \
     "$(env_value "${UPSTREAM_ENV_FILE}" NODE1_MOONCAKE_HOST)" \
     "$(env_value "${UPSTREAM_ENV_FILE}" NODE2_MOONCAKE_HOST)" \
-    "$(env_value "${UPSTREAM_ENV_FILE}" NODE3_MOONCAKE_HOST)" <<'PY'
+    "$(env_value "${UPSTREAM_ENV_FILE}" NODE3_MOONCAKE_HOST)" \
+    "$(env_value "${UPSTREAM_ENV_FILE}" WORKER_PORT)" \
+    "$(env_value "${UPSTREAM_ENV_FILE}" ROUTER_PORT)" \
+    "$(env_value "${UPSTREAM_ENV_FILE}" BOOTSTRAP_PORT)" <<'PY'
 import json, pathlib, sys
 (
     output, pair_id, baseline_id, state_id, trace_sha, source_sha, revision,
     dirty, upstream_image, state_image, model_id, model_path, gpu_ids,
-    tp_size, dp_size, mem_fraction, ib_device, gid_index, use_ipv6, *hosts
+    tp_size, dp_size, mem_fraction, ib_device, gid_index, use_ipv6,
+    host0, host1, host2, host3, worker_port, router_port, bootstrap_port,
 ) = sys.argv[1:]
 design = {
     "pair_id": pair_id,
@@ -172,7 +177,10 @@ design = {
     "ib_device": ib_device,
     "mc_gid_index": int(gid_index),
     "mc_use_ipv6": int(use_ipv6),
-    "mooncake_hosts": hosts,
+    "mooncake_hosts": [host0, host1, host2, host3],
+    "worker_port": int(worker_port),
+    "router_port": int(router_port),
+    "bootstrap_port": int(bootstrap_port),
     "workload": {
         "requests": 40, "arrival_interval_seconds": 0.2,
         "long_ttft_slo_seconds": 0.45, "short_ttft_slo_seconds": 0.25,
@@ -197,7 +205,8 @@ s = json.load(open(state / "state_machine" / "manifest.json"))
 keys = (
     "trace_sha256", "model_id", "model_fingerprint", "gpu_ids", "tp_size",
     "dp_size", "mem_fraction_static", "ib_device", "mc_gid_index",
-    "mc_use_ipv6", "mooncake_hosts", "output_contract",
+    "mc_use_ipv6", "mooncake_hosts", "worker_port", "router_port",
+    "bootstrap_port", "output_contract",
 )
 mismatches = {key: [b.get(key), s.get(key)] for key in keys if b.get(key) != s.get(key)}
 assert not mismatches, f"baseline/state provenance mismatch: {mismatches}"
