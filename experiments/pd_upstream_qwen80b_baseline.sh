@@ -125,7 +125,7 @@ set -euo pipefail
 name="$1"; image="$2"; expected_image_id="$3"; output="$4"
 test "$(docker image inspect "$image" --format '{{.Id}}')" = "$expected_image_id"
 if test -x "$output/sgl-router" && test -s "$output/provenance.json"; then
-  python3 -c "import json; d=json.load(open('$output/provenance.json')); assert d['image_id']=='$expected_image_id'"
+  python3 -c "import json; d=json.load(open('$output/provenance.json')); assert d['image_id']=='$expected_image_id' and d['source']=='image:/usr/local/bin/sglang-router'"
   sha256sum "$output/sgl-router"
   exit 0
 fi
@@ -134,21 +134,13 @@ if docker inspect "$name" >/dev/null 2>&1; then
   exit 2
 fi
 mkdir -p "$output"
-docker run --name "$name" --network host -v "$output:/out" "$image" bash -lc '
-  set -euo pipefail
-  if ! command -v cargo >/dev/null 2>&1; then
-    curl --fail --location --retry 5 https://sh.rustup.rs | sh -s -- -y --profile minimal
-    source "$HOME/.cargo/env"
-  fi
-  cd /sgl-workspace/sglang/experimental/sgl-router
-  if test -f Cargo.lock; then cargo build --release --locked; else cargo build --release; fi
-  install -m 0755 target/release/sgl-router /out/sgl-router
-  sha256sum /out/sgl-router
-' >"$output/build-${name}.log" 2>&1
+docker create --name "$name" "$image" /bin/true >/dev/null
+docker cp "$name:/usr/local/bin/sglang-router" "$output/sgl-router"
+chmod 0755 "$output/sgl-router"
 docker inspect "$name" >"$output/build-${name}.inspect.json"
 docker rm "$name" >/dev/null
 router_sha="$(sha256sum "$output/sgl-router" | awk '{print $1}')"
-printf '{"image_id":"%s","router_sha256":"%s","source":"/sgl-workspace/sglang/experimental/sgl-router"}\n' "$expected_image_id" "$router_sha" >"$output/provenance.json"
+printf '{"image_id":"%s","router_sha256":"%s","source":"image:/usr/local/bin/sglang-router"}\n' "$expected_image_id" "$router_sha" >"$output/provenance.json"
 cat "$output/provenance.json"
 REMOTE
 }
@@ -221,17 +213,19 @@ save_worker_inspect() {
 start_router() {
   local host="${SSH_HOSTS[0]}" name
   name="$(router_name)"
-  ssh "${host}" bash -s -- "${name}" "${RUN_ID}" "${IMAGE}" "${EXPECTED_IMAGE_ID}" "${ROUTER_ARTIFACT_DIR}/sgl-router" "${MODEL_PATH}" "${TOKENIZER_PATH}" "${MODEL_ID}" "${ROUTER_PORT}" "${WORKER_PORT}" "${NODE_IPS[0]}" "${NODE_IPS[1]}" "${NODE_IPS[2]}" "${NODE_IPS[3]}" <<'REMOTE'
+  ssh "${host}" bash -s -- "${name}" "${RUN_ID}" "${IMAGE}" "${EXPECTED_IMAGE_ID}" "${MODEL_PATH}" "${TOKENIZER_PATH}" "${ROUTER_PORT}" "${WORKER_PORT}" "${BOOTSTRAP_PORT}" "${NODE_IPS[0]}" "${NODE_IPS[1]}" "${NODE_IPS[2]}" "${NODE_IPS[3]}" <<'REMOTE'
 set -euo pipefail
-name="$1"; run_id="$2"; image="$3"; expected_image_id="$4"; binary="$5"; model_path="$6"; tokenizer="$7"; model_id="$8"; router_port="$9"; shift 9
-worker_port="$1"; ip0="$2"; ip1="$3"; ip2="$4"; ip3="$5"
+name="$1"; run_id="$2"; image="$3"; expected_image_id="$4"; model_path="$5"; tokenizer="$6"; router_port="$7"; worker_port="$8"; bootstrap_port="$9"; shift 9
+ip0="$1"; ip1="$2"; ip2="$3"; ip3="$4"
 test "$(docker image inspect "$image" --format '{{.Id}}')" = "$expected_image_id"
 docker run -d --name "$name" --network host \
   --label tiancij.experiment=pd-upstream-qwen80b --label "tiancij.run_id=$run_id" \
-  -v "$binary:/opt/tiancij/bin/sgl-router:ro" -v "$model_path:$model_path:ro" \
-  "$image" /opt/tiancij/bin/sgl-router --host 0.0.0.0 --port "$router_port" \
-  --model-id "$model_id" --tokenizer-path "$tokenizer" --request-timeout-secs 7200 \
-  --worker-urls "http://$ip0:$worker_port" "http://$ip1:$worker_port" "http://$ip2:$worker_port" "http://$ip3:$worker_port"
+  -v "$model_path:$model_path:ro" \
+  "$image" /usr/local/bin/sglang-router launch --host 0.0.0.0 --port "$router_port" \
+  --model-path "$model_path" --tokenizer-path "$tokenizer" --request-timeout-secs 7200 \
+  --pd-disaggregation --policy cache_aware \
+  --prefill "http://$ip0:$worker_port" "$bootstrap_port" \
+  --decode "http://$ip1:$worker_port" --decode "http://$ip2:$worker_port" --decode "http://$ip3:$worker_port"
 REMOTE
   ssh "${host}" "for attempt in \$(seq 1 \"${ROUTER_HEALTH_ATTEMPTS}\"); do curl -fsS 'http://127.0.0.1:${ROUTER_PORT}/v1/models' >/dev/null && exit 0; sleep '${HEALTH_POLL_SECONDS}'; done; docker logs --tail 200 '${name}' >&2; exit 1"
   ssh "${host}" "docker inspect '${name}' > '${RUN_DIR}/inspect/router.json'; docker inspect '${name}' --format '{{json .Config.Cmd}} {{json .Config.Env}}' > '${RUN_DIR}/inspect/router.effective.txt'; docker inspect '${name}' --format '{{json .Mounts}}' | grep -F '/sgl-workspace/sglang' && exit 1 || true"

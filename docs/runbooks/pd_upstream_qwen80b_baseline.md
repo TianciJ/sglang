@@ -70,17 +70,17 @@ Pre-existing containers shown by preflight are evidence, not cleanup targets.
 The runner never stops a container unless its exact name and
 `tiancij.run_id=$RUN_ID` label both match.
 
-## Build and inspect the official router
+## Extract and inspect the official router
 
 ```bash
 bash experiments/pd_upstream_qwen80b_baseline.sh build-router
 ```
 
-This uses a no-GPU container from the clean image and compiles only
-`/sgl-workspace/sglang/experimental/sgl-router` embedded in that image. It does
-not mount the modified repository. The binary, build log, inspect record,
-image ID, and SHA256 are retained under `ROUTER_ARTIFACT_DIR`; a matching
-previously built artifact may be reused.
+This creates a no-GPU container from the clean image and extracts the
+image-provided `/usr/local/bin/sglang-router` launcher. It does not download a
+Rust toolchain, rebuild router code, or mount the modified repository. The
+launcher hash, image ID, source path, and inspect record are retained under
+`ROUTER_ARTIFACT_DIR`; a matching artifact may be reused.
 
 Review the complete redacted command plan before loading the model:
 

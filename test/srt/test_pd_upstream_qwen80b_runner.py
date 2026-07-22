@@ -112,6 +112,18 @@ def test_never_mounts_host_code_into_worker_or_router_and_has_no_custom_flags():
     assert "-v \"${REMOTE_HELPER_REPO}:/work/sglang:ro\"" in text
 
 
+def test_uses_router_shipped_in_clean_image_without_rust_bootstrap():
+    text = source()
+    assert "image:/usr/local/bin/sglang-router" in text
+    assert 'docker cp "$name:/usr/local/bin/sglang-router"' in text
+    assert "/usr/local/bin/sglang-router launch" in text
+    assert "--pd-disaggregation --policy cache_aware" in text
+    assert '--prefill "http://$ip0:$worker_port" "$bootstrap_port"' in text
+    assert text.count('--decode "http://$ip') == 3
+    assert "sh.rustup.rs" not in text
+    assert "cargo build" not in text
+
+
 def test_uses_only_exact_owned_names_and_safe_stop_primitives():
     text = source()
     assert "set -Eeuo pipefail" in text
