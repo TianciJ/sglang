@@ -109,8 +109,14 @@ on_failure() {
   cleanup_owned failure
   exit "${status}"
 }
+on_signal() {
+  trap - ERR INT TERM
+  echo "run interrupted; preserving ${RUN_DIR} and stopping exact run-owned resources" >&2
+  cleanup_owned interrupted
+  exit 130
+}
 trap on_failure ERR
-trap 'exit 130' INT TERM
+trap on_signal INT TERM
 
 preflight() {
   [[ "${RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "invalid RUN_ID" >&2; return 2; }
@@ -181,7 +187,8 @@ PY
 }
 
 write_envs() {
-  local index worker_urls="" env_file
+  local index worker_urls="" env_file extra_sglang_args_quoted
+  printf -v extra_sglang_args_quoted '%q' "--trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics"
   for index in 0 1 2 3; do
     worker_urls+=" http://${NODE_IP}:${WORKER_PORTS_A[$index]}"
   done
@@ -217,7 +224,7 @@ ENABLE_PD_FLIP_STATE_MACHINE=1
 ENABLE_PD_RUNTIME_ROLE_SWITCH=1
 ENABLE_PD_FLIP_HICACHE_STITCH=0
 ENABLE_PD_FLIP_PREFILL_DONOR=0
-EXTRA_SGLANG_ARGS=--trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics
+EXTRA_SGLANG_ARGS=${extra_sglang_args_quoted}
 WORKER_URLS=${worker_urls}
 PD_FLIP_WORKER_CONTAINER_NAME=$(worker_name "${index}")
 PD_FLIP_ROUTER_CONTAINER_NAME=$(router_name)
@@ -237,12 +244,18 @@ start_workers() {
     echo "$!" > "${RUN_DIR}/status/mi${index}.launcher.pid"
   done
   for index in 0 1 2 3; do
+    local launcher_pid
+    launcher_pid="$(cat "${RUN_DIR}/status/mi${index}.launcher.pid")"
     for attempt in $(seq 1 1800); do
       if curl -fsS "http://${NODE_IP}:${WORKER_PORTS_A[$index]}/health" >/dev/null 2>&1 && \
          curl -fsS -H "Authorization: Bearer ${ADMIN_API_KEY}" "http://${NODE_IP}:${WORKER_PORTS_A[$index]}/pd_flip/runtime_role/status" | \
            python3 -c "import json,sys; v=json.load(sys.stdin); xs=v if isinstance(v,list) else [v]; assert xs and all(x.get('success') is True and x.get('status',{}).get('role')=='${ROLES[$index]}' and x.get('status',{}).get('active_event_loop_role')=='${ROLES[$index]}' for x in xs)"; then
         break
       fi
+      kill -0 "${launcher_pid}" 2>/dev/null || {
+        echo "mi${index} launcher exited before health gate" >&2
+        return 1
+      }
       [[ "${attempt}" != 1800 ]] || return 1
       sleep 2
     done
