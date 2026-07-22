@@ -211,13 +211,9 @@ validate_pair_provenance() {
   for index in 0 1 2 3; do
     host="$(env_value "${UPSTREAM_ENV_FILE}" "NODE${index}_SSH")"
     if [[ -z "${host}" ]]; then
-      case "${index}" in
-        0) host="cloud-099" ;;
-        1) host="cloud-100" ;;
-        2) host="cloud-101" ;;
-        3) host="cloud-102" ;;
-      esac
+      host="$(env_value "${UPSTREAM_ENV_FILE}" "NODE${index}_IP")"
     fi
+    [[ -n "${host}" ]] || die "missing SSH/IP host for node ${index}"
     canonical="$(ssh "${host}" "{ sha256sum '${model_path}/config.json' '${model_path}/tokenizer.json'; find '${model_path}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
     legacy="$(ssh "${host}" "{ sha256sum '${model_path}/config.json'; find '${model_path}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
     if [[ -z "${canonical_model_fingerprint}" ]]; then
