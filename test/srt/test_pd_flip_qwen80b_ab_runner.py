@@ -90,6 +90,14 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             worker_source,
         )
 
+    def test_final_topology_expression_survives_remote_shell_quoting(self):
+        runner_source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn(
+            "topology=str(roles.count('prefill'))+'P'+str(roles.count('decode'))+'D'",
+            runner_source,
+        )
+        self.assertNotIn('roles.count(\\"prefill\\")', runner_source)
+
     def test_runner_can_copy_and_validate_a_frozen_natural_trace(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn('if [[ -n "${TRACE_SOURCE:-}" ]]', source)

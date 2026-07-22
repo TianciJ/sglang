@@ -425,7 +425,7 @@ summarize_measurements() {
 finalize_controller_contract() {
   local mode="state_machine" host="${SSH_HOSTS[0]}"
   ssh "${host}" "source '${RUN_DIR}/${mode}/node0.env'; curl -fsS -H \"Authorization: Bearer \${ADMIN_API_KEY}\" 'http://127.0.0.1:${ROUTER_PORT}/pd_flip/router/workers' > '${RUN_DIR}/${mode}/controller/final_router.json'"
-  ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/${mode}/controller/result.json'; q='${RUN_DIR}/${mode}/controller/final_router.json'; d=json.load(open(p)); r=json.load(open(q)); roles=[str(x.get('role','')).lower() for x in r.get('workers',[])]; d.update(first_migration_ratio=${PD_FLIP_FIRST_MIGRATION_RATIO}, observation_seconds=float(${PD_FLIP_OBSERVATION_SECONDS}), final_topology=f'{roles.count(\"prefill\")}P{roles.count(\"decode\")}D'); open(p,'w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
+  ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/${mode}/controller/result.json'; q='${RUN_DIR}/${mode}/controller/final_router.json'; d=json.load(open(p)); r=json.load(open(q)); roles=[str(x.get('role','')).lower() for x in r.get('workers',[])]; topology=str(roles.count('prefill'))+'P'+str(roles.count('decode'))+'D'; d.update(first_migration_ratio=${PD_FLIP_FIRST_MIGRATION_RATIO}, observation_seconds=float(${PD_FLIP_OBSERVATION_SECONDS}), final_topology=topology); open(p,'w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
 }
 
 run_workload() {
