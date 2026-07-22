@@ -174,7 +174,7 @@ done
 test -r /sys/class/infiniband/{ib}/ports/1/gids/{gid}
 test "$(cat /sys/class/infiniband/{ib}/ports/1/gids/{gid})" != 0000:0000:0000:0000:0000:0000:0000:0000
 nvidia-smi -L >/dev/null
-{{ docker image inspect {image} --format '{{{{.Id}}}}'; sha256sum {model}/config.json {model}/tokenizer.json; find {model} -maxdepth 1 -name '*.safetensors' -printf '%f:%s\n' | LC_ALL=C sort; sha256sum {repo}/experiments/pd_flip_qwen80b_16_instance.py {repo}/scripts/playground/disaggregation/pd_flip_controller.py {repo}/scripts/playground/disaggregation/pd_flip_candidate_prefill_warmup.py {repo}/scripts/playground/disaggregation/pd_flip_docker/run_worker.sh {repo}/scripts/playground/disaggregation/pd_flip_docker/run_router.sh {repo}/experimental/sgl-router/target/release/sgl-router; }} | sha256sum
+{{ docker image inspect {image} --format '{{{{.Id}}}}'; sha256sum {model}/config.json {model}/tokenizer.json; find {model} -maxdepth 1 -name '*.safetensors' -printf '%f:%s\n' | LC_ALL=C sort; sha256sum {repo}/experiments/pd_flip_qwen80b_16_instance.py {repo}/scripts/playground/disaggregation/pd_flip_controller.py {repo}/scripts/playground/disaggregation/pd_flip_candidate_prefill_warmup.py {repo}/scripts/playground/disaggregation/pd_flip_docker/run_worker.sh {repo}/scripts/playground/disaggregation/pd_flip_docker/run_router.sh; }} | sha256sum
 date --iso-8601=ns
 cat /sys/class/infiniband/{ib}/ports/1/gids/{gid}
 df -Pk {artifact_root} {model} | tail -n +2
@@ -195,6 +195,15 @@ df -Pk {artifact_root} {model} | tail -n +2
         actual = hashlib.sha256(Path(self.trace_source).read_bytes()).hexdigest()
         if actual != self.trace_sha:
             raise RuntimeError("trace SHA mismatch")
+        router_binary = self.repo + "/experimental/sgl-router/target/release/sgl-router"
+        router_result = self.remote(
+            self.ssh_hosts[0],
+            "test -x {0} && sha256sum {0}".format(self.q(router_binary)),
+            check=False,
+            timeout=30,
+        )
+        if router_result.returncode:
+            raise RuntimeError("coordinator router binary is missing or not executable")
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             futures = [pool.submit(self.preflight_host, index) for index in range(4)]
