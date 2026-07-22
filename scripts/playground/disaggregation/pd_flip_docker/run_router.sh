@@ -42,7 +42,17 @@ fi
 if [[ -n "${router_tokenizer_path}" ]]; then
   args+=(--tokenizer-path "${router_tokenizer_path}")
 fi
-args+=(--worker-urls "${NODE0}" "${NODE1}" "${NODE2}" "${NODE3}")
+if [[ -n "${WORKER_URLS:-}" ]]; then
+  # shellcheck disable=SC2206
+  worker_urls=(${WORKER_URLS})
+  if ((${#worker_urls[@]} < 2)); then
+    echo "WORKER_URLS must contain at least two worker URLs" >&2
+    exit 2
+  fi
+  args+=(--worker-urls "${worker_urls[@]}")
+else
+  args+=(--worker-urls "${NODE0}" "${NODE1}" "${NODE2}" "${NODE3}")
+fi
 
 if [[ -n "${EXTRA_ROUTER_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
