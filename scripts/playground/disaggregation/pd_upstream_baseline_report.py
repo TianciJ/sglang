@@ -87,8 +87,8 @@ def _validate_manifest(manifest: JsonDict) -> None:
         raise ValueError(f"unexpected image_id: {manifest['image_id']}")
     if manifest["trace_sha256"] != EXPECTED_TRACE_SHA256:
         raise ValueError(f"unexpected trace_sha256: {manifest['trace_sha256']}")
-    if manifest["topology"] != "1P3D" or manifest["tp_size"] != 4 or manifest["dp_size"] != 1:
-        raise ValueError("manifest topology must be 1P3D with TP=4 and DP=1")
+    if manifest["topology"] != "1P3D" or manifest["tp_size"] != 2 or manifest["dp_size"] != 1:
+        raise ValueError("manifest topology must be 1P3D with TP=2 and DP=1")
     if manifest["output_contract"] != "natural":
         raise ValueError("manifest output_contract must be natural")
     if manifest["tpot_metric_source"] != EXPECTED_TPOT_SOURCE:

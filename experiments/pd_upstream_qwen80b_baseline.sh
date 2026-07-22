@@ -585,7 +585,7 @@ collect_stop() {
 
 report() {
   local host="${SSH_HOSTS[0]}" name="$(helper_name)-report"
-  ssh "${host}" "docker run --name '${name}' --network none --label tiancij.experiment=pd-upstream-qwen80b --label 'tiancij.run_id=${RUN_ID}' -v '${REMOTE_HELPER_REPO}:/work/sglang:ro' -v '${RUN_DIR}:/run' '${HELPER_IMAGE}' bash -lc 'cd /work/sglang && python3 scripts/playground/disaggregation/pd_upstream_baseline_report.py --run-dir /run' > '${RUN_DIR}/logs/report.log' 2>&1; docker rm '${name}' >/dev/null"
+  ssh "${host}" "status=0; docker run --name '${name}' --network none --label tiancij.experiment=pd-upstream-qwen80b --label 'tiancij.run_id=${RUN_ID}' -v '${REMOTE_HELPER_REPO}:/work/sglang:ro' -v '${RUN_DIR}:/run' '${HELPER_IMAGE}' bash -lc 'cd /work/sglang && python3 scripts/playground/disaggregation/pd_upstream_baseline_report.py --run-dir /run' > '${RUN_DIR}/logs/report.log' 2>&1 || status=\$?; docker rm '${name}' >/dev/null; exit \"\$status\""
   ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/manifest.json'; d=json.load(open(p)); d['validity']='valid'; open(p,'w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\"; find '${RUN_DIR}' -type f ! -name INVENTORY.txt -print0 | sort -z | xargs -0 sha256sum > '${RUN_DIR}/INVENTORY.txt'"
 }
 

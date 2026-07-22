@@ -138,6 +138,13 @@ def test_safe_stop_removes_created_containers_without_stopping_them():
     assert 'docker rm "${name}"' in text
 
 
+def test_report_failure_is_not_hidden_by_container_removal():
+    text = source()
+    assert "status=0; docker run --name '${name}'" in text
+    assert "|| status=\\$?; docker rm '${name}'" in text
+    assert "exit \\\"\\$status\\\"" in text
+
+
 def test_has_bounded_gates_concurrent_start_and_purity_inspection():
     text = source()
     assert "seq 1" in text and "WORKER_HEALTH_ATTEMPTS" in text
