@@ -130,6 +130,15 @@ if [[ "${EXTRA_DOCKER_ARGS:-}" != *"MOONCAKE_LOCAL_HOSTNAME"* ]]; then
     extra_docker_args+=(-e "MOONCAKE_LOCAL_HOSTNAME=${host_ip}")
   fi
 fi
+if [[ "${EXTRA_DOCKER_ARGS:-}" != *"SGLANG_HOST_IP"* ]]; then
+  # The PD bootstrap endpoint must advertise the same address family that
+  # Mooncake uses. In particular, MC_USE_IPV6=1 with an IPv4 bootstrap
+  # advertisement makes the transfer metadata handshake fail before KV copy.
+  sglang_host_ip="${SGLANG_HOST_IP:-${host_ip:-${MOONCAKE_LOCAL_HOSTNAME:-}}}"
+  if [[ -n "${sglang_host_ip}" ]]; then
+    extra_docker_args+=(-e "SGLANG_HOST_IP=${sglang_host_ip}")
+  fi
+fi
 
 docker_action=(run --rm)
 if [[ -n "${PD_FLIP_WORKER_CONTAINER_NAME:-}" ]]; then

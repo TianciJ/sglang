@@ -75,6 +75,21 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         self.assertIn("MOONCAKE_LOCAL_HOSTNAME=${MOONCAKE_HOSTS[$index]}", runner_source)
         self.assertIn("MC_USE_IPV6=${MC_USE_IPV6:-1}", runner_source)
 
+    def test_worker_advertises_mooncake_address_for_pd_bootstrap(self):
+        worker_source = (
+            ROOT
+            / "scripts"
+            / "playground"
+            / "disaggregation"
+            / "pd_flip_docker"
+            / "run_worker.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('extra_docker_args+=(-e "SGLANG_HOST_IP=${sglang_host_ip}")', worker_source)
+        self.assertIn(
+            'sglang_host_ip="${SGLANG_HOST_IP:-${host_ip:-${MOONCAKE_LOCAL_HOSTNAME:-}}}"',
+            worker_source,
+        )
+
     def test_runner_can_copy_and_validate_a_frozen_natural_trace(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn('if [[ -n "${TRACE_SOURCE:-}" ]]', source)
