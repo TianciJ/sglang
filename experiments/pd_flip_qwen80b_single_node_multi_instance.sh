@@ -70,12 +70,47 @@ capture_container_log() {
   docker logs --timestamps "${name}" > "${output}" 2>&1 || true
 }
 
+redact_log_file() {
+  local path="$1"
+  [[ -f "${path}" ]] || return 0
+  ADMIN_API_KEY="${ADMIN_API_KEY}" python3 - "${path}" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+secret = os.environ["ADMIN_API_KEY"].encode()
+data = path.read_bytes()
+redacted = data.replace(secret, b"<redacted>")
+if redacted != data:
+    temporary = path.with_name(path.name + ".redacting")
+    temporary.write_bytes(redacted)
+    temporary.replace(path)
+PY
+}
+
 stop_exact_if_present() {
   local name="$1" timeout="$2"
   docker inspect "${name}" >/dev/null 2>&1 || return 0
   case "$(docker inspect "${name}" --format '{{.State.Status}}')" in
     running|paused|restarting) docker stop --time "${timeout}" "${name}" >/dev/null ;;
   esac
+}
+
+interrupt_sampler_if_present() {
+  local name="$1" state attempt
+  docker inspect "${name}" >/dev/null 2>&1 || return 0
+  state="$(docker inspect "${name}" --format '{{.State.Status}}')"
+  if [[ "${state}" == "running" ]]; then
+    docker kill --signal=INT "${name}" >/dev/null
+    for attempt in $(seq 1 60); do
+      state="$(docker inspect "${name}" --format '{{.State.Status}}' 2>/dev/null || true)"
+      [[ "${state}" != "running" ]] && return 0
+      sleep 1
+    done
+    echo "sampler did not exit after targeted SIGINT: ${name}" >&2
+    return 1
+  fi
 }
 
 cleanup_owned() {
@@ -85,7 +120,11 @@ cleanup_owned() {
   for component in warmup observer controller sampler; do
     name="$(helper_name "${component}")"
     capture_container_log "${name}" "${RUN_DIR}/logs/${component}.docker.log"
-    stop_exact_if_present "${name}" 300
+    if [[ "${component}" == sampler ]]; then
+      interrupt_sampler_if_present "${name}"
+    else
+      stop_exact_if_present "${name}" 300
+    fi
     docker rm "${name}" >/dev/null 2>&1 || true
   done
   name="$(router_name)"
@@ -95,6 +134,9 @@ cleanup_owned() {
     name="$(worker_name "${index}")"
     capture_container_log "${name}" "${RUN_DIR}/logs/mi${index}.docker.log"
     stop_exact_if_present "${name}" 1800
+  done
+  for name in "${RUN_DIR}"/logs/*; do
+    redact_log_file "${name}"
   done
   printf '%s\n' "${reason}" > "${RUN_DIR}/status/teardown_reason.txt"
   nvidia-smi -L > "${RUN_DIR}/status/nvidia-smi-L-after.txt" 2>&1 || true
@@ -347,7 +389,7 @@ run_measured_workload() {
   capture_container_log "$(helper_name observer)" "${RUN_DIR}/logs/observer.docker.log"
   capture_container_log "$(helper_name controller)" "${RUN_DIR}/logs/controller.docker.log"
   docker rm "$(helper_name observer)" "$(helper_name controller)" >/dev/null
-  stop_exact_if_present "$(helper_name sampler)" 300
+  interrupt_sampler_if_present "$(helper_name sampler)"
   capture_container_log "$(helper_name sampler)" "${RUN_DIR}/logs/sampler.docker.log"
   docker rm "$(helper_name sampler)" >/dev/null
 }

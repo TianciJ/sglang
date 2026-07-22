@@ -98,7 +98,9 @@ launch_cmd="cd /sgl-workspace/sglang && PYTHONPATH=python exec ${server_cmd}--ad
 # shellcheck disable=SC2206
 extra_docker_args=(${EXTRA_DOCKER_ARGS:-})
 if [[ "${EXTRA_DOCKER_ARGS:-}" != *"ADMIN_API_KEY"* ]]; then
-  extra_docker_args+=(-e "ADMIN_API_KEY=${ADMIN_API_KEY}")
+  # Let Docker inherit the exported value without placing the secret in argv.
+  export ADMIN_API_KEY
+  extra_docker_args+=(-e ADMIN_API_KEY)
 fi
 if [[ -n "${SGLANG_COMPILE_CACHE_HOST_DIR:-}" ]]; then
   cache_root="${SGLANG_COMPILE_CACHE_CONTAINER_DIR}"
