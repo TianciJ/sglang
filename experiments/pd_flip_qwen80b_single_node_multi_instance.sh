@@ -187,12 +187,13 @@ PY
 }
 
 write_envs() {
-  local index worker_urls="" env_file extra_sglang_args_quoted
+  local index worker_urls="" worker_urls_quoted env_file extra_sglang_args_quoted
   printf -v extra_sglang_args_quoted '%q' "--trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics"
   for index in 0 1 2 3; do
     worker_urls+=" http://${NODE_IP}:${WORKER_PORTS_A[$index]}"
   done
   worker_urls="${worker_urls# }"
+  printf -v worker_urls_quoted '%q' "${worker_urls}"
   for index in 0 1 2 3; do
     env_file="${RUN_DIR}/env/mi${index}.env"
     umask 077
@@ -225,13 +226,31 @@ ENABLE_PD_RUNTIME_ROLE_SWITCH=1
 ENABLE_PD_FLIP_HICACHE_STITCH=0
 ENABLE_PD_FLIP_PREFILL_DONOR=0
 EXTRA_SGLANG_ARGS=${extra_sglang_args_quoted}
-WORKER_URLS=${worker_urls}
+WORKER_URLS=${worker_urls_quoted}
 PD_FLIP_WORKER_CONTAINER_NAME=$(worker_name "${index}")
 PD_FLIP_ROUTER_CONTAINER_NAME=$(router_name)
 ROUTER_DYNAMO_TARBALL_FALLBACK=0
 CARGO_NET_OFFLINE=true
 EOF
     chmod 600 "${env_file}"
+  done
+}
+
+validate_env_files() {
+  local index expected_worker_urls="" expected_extra
+  for index in 0 1 2 3; do
+    expected_worker_urls+=" http://${NODE_IP}:${WORKER_PORTS_A[$index]}"
+  done
+  expected_worker_urls="${expected_worker_urls# }"
+  expected_extra="--trust-remote-code --mamba-scheduler-strategy extra_buffer --enable-metrics"
+  for index in 0 1 2 3; do
+    (
+      unset WORKER_URLS EXTRA_SGLANG_ARGS
+      # shellcheck disable=SC1090
+      source "${RUN_DIR}/env/mi${index}.env"
+      [[ "${WORKER_URLS}" == "${expected_worker_urls}" ]]
+      [[ "${EXTRA_SGLANG_ARGS}" == "${expected_extra}" ]]
+    )
   done
 }
 
@@ -375,10 +394,18 @@ post_teardown_gate() {
 
 case "${COMMAND:-${COMMAND_ARG}}" in
   preflight) preflight ;;
+  prepare)
+    preflight
+    prepare
+    write_envs
+    validate_env_files
+    echo "multi-instance environment validation passed: ${RUN_DIR}"
+    ;;
   run)
     preflight
     prepare
     write_envs
+    validate_env_files
     start_workers
     start_router
     warmup
@@ -389,5 +416,5 @@ case "${COMMAND:-${COMMAND_ARG}}" in
     trap - ERR INT TERM
     echo "single-node multi-instance feasibility run valid: ${RUN_DIR}"
     ;;
-  *) echo "usage: ENV_FILE=/private/file $0 [env-file] preflight|run" >&2; exit 2 ;;
+  *) echo "usage: ENV_FILE=/private/file $0 [env-file] preflight|prepare|run" >&2; exit 2 ;;
 esac
