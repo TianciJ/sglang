@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import html
 import json
 import math
@@ -14,7 +15,6 @@ from typing import Any, Iterable
 
 
 EXPECTED_IMAGE_ID = "sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e"
-EXPECTED_TRACE_SHA256 = "c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d"
 EXPECTED_TPOT_SOURCE = "client_first_last_output_over_usage_completion_tokens"
 PROVENANCE_FIELDS = (
     "run_id",
@@ -79,14 +79,26 @@ def stats(values: Iterable[float]) -> JsonDict:
     }
 
 
-def _validate_manifest(manifest: JsonDict) -> None:
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_manifest(manifest: JsonDict, run_dir: Path) -> None:
     missing = [field for field in PROVENANCE_FIELDS if manifest.get(field) in (None, "")]
     if missing:
         raise ValueError("missing provenance fields: " + ", ".join(missing))
     if manifest["image_id"] != EXPECTED_IMAGE_ID:
         raise ValueError(f"unexpected image_id: {manifest['image_id']}")
-    if manifest["trace_sha256"] != EXPECTED_TRACE_SHA256:
-        raise ValueError(f"unexpected trace_sha256: {manifest['trace_sha256']}")
+    actual_trace_sha256 = _sha256(run_dir / "trace" / "trace.jsonl")
+    if manifest["trace_sha256"] != actual_trace_sha256:
+        raise ValueError(
+            "manifest trace_sha256 does not match the retained trace: "
+            f"{manifest['trace_sha256']} != {actual_trace_sha256}"
+        )
     if manifest["topology"] != "1P3D" or manifest["tp_size"] != 2 or manifest["dp_size"] != 1:
         raise ValueError("manifest topology must be 1P3D with TP=2 and DP=1")
     if manifest["output_contract"] != "natural":
@@ -270,7 +282,7 @@ def generate_report(
 ) -> JsonDict:
     run_dir = Path(run_dir)
     manifest = read_json(run_dir / "manifest.json")
-    _validate_manifest(manifest)
+    _validate_manifest(manifest, run_dir)
     raw = run_dir / "raw" / "upstream_baseline"
     rows = read_jsonl(raw / "request_metrics.jsonl")
     _validate_requests(rows, expected_requests, expected_tokens)

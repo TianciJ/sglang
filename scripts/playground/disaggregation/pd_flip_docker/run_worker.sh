@@ -118,13 +118,14 @@ for name in \
   MOONCAKE_GLOBAL_SEGMENT_SIZE \
   MOONCAKE_PROTOCOL \
   MOONCAKE_DEVICE \
+  MC_USE_IPV6 \
   MC_GID_INDEX; do
   if [[ -n "${!name:-}" && "${EXTRA_DOCKER_ARGS:-}" != *"${name}"* ]]; then
     extra_docker_args+=(-e "${name}=${!name}")
   fi
 done
 if [[ "${EXTRA_DOCKER_ARGS:-}" != *"MOONCAKE_LOCAL_HOSTNAME"* ]]; then
-  host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  host_ip="${MOONCAKE_LOCAL_HOSTNAME:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
   if [[ -n "${host_ip}" ]]; then
     extra_docker_args+=(-e "MOONCAKE_LOCAL_HOSTNAME=${host_ip}")
   fi

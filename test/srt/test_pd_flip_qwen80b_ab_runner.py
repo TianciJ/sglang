@@ -65,12 +65,15 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             "MIN_TTFT_SAMPLES=10",
             "MIN_TPOT_INTERVALS=100",
             "CONTROLLER_POLL_SECONDS=0.25",
-            "ENABLE_CANDIDATE_PREFILL_WARMUP=0",
+            'ENABLE_CANDIDATE_PREFILL_WARMUP="${ENABLE_CANDIDATE_PREFILL_WARMUP:-0}"',
             "COMPILE_CACHE_ROOT=/home/tiancij/sglang-compile-cache",
         ):
             self.assertIn(value, source)
         runner_source = RUNNER.read_text(encoding="utf-8")
         self.assertIn('IB_DEVICE="${IB_DEVICE:-mlx5_bond_1}"', runner_source)
+        self.assertIn("MOONCAKE_HOSTS=(", runner_source)
+        self.assertIn("MOONCAKE_LOCAL_HOSTNAME=${MOONCAKE_HOSTS[$index]}", runner_source)
+        self.assertIn("MC_USE_IPV6=${MC_USE_IPV6:-1}", runner_source)
 
     def test_runner_can_copy_and_validate_a_frozen_natural_trace(self):
         source = RUNNER.read_text(encoding="utf-8")

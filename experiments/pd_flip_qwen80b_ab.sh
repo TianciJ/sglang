@@ -24,6 +24,9 @@ TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
 TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-的}"
 TRACE_OUTPUT_CONTRACT="${TRACE_OUTPUT_CONTRACT:-forced_single_token}"
 ENABLE_CUSTOM_LOGIT_PROCESSOR="${ENABLE_CUSTOM_LOGIT_PROCESSOR:-1}"
+TRACE_INTERVAL_SECONDS="${TRACE_INTERVAL_SECONDS:-0.2}"
+TRACE_LONG_TTFT_SLO_SECONDS="${TRACE_LONG_TTFT_SLO_SECONDS:-0.45}"
+TRACE_SHORT_TTFT_SLO_SECONDS="${TRACE_SHORT_TTFT_SLO_SECONDS:-0.25}"
 PD_FLIP_FIRST_MIGRATION_RATIO="${PD_FLIP_FIRST_MIGRATION_RATIO:-0.5}"
 PD_FLIP_OBSERVATION_SECONDS="${PD_FLIP_OBSERVATION_SECONDS:-3}"
 SLO_WINDOW_SECONDS="${SLO_WINDOW_SECONDS:-10}"
@@ -41,6 +44,7 @@ CACHE_PROVENANCE_HASH=""
 
 SSH_HOSTS=("${NODE0_SSH:-cloud-099}" "${NODE1_SSH:-cloud-100}" "${NODE2_SSH:-cloud-101}" "${NODE3_SSH:-cloud-102}")
 NODE_IPS=("${NODE0_IP:-192.168.0.42}" "${NODE1_IP:-192.168.0.40}" "${NODE2_IP:-192.168.0.39}" "${NODE3_IP:-192.168.0.41}")
+MOONCAKE_HOSTS=("${NODE0_MOONCAKE_HOST:-}" "${NODE1_MOONCAKE_HOST:-}" "${NODE2_MOONCAKE_HOST:-}" "${NODE3_MOONCAKE_HOST:-}")
 ROLES=(prefill decode decode decode)
 ACTIVE_MODE=""
 
@@ -154,6 +158,8 @@ preflight() {
     fi
     ssh "${host}" "for gpu in ${gpu_list}; do test -z \"\$(nvidia-smi -i \"\$gpu\" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' || true)\" || { echo selected GPU \$gpu is busy >&2; exit 1; }; done"
     ssh "${host}" "test -d '/sys/class/infiniband/${IB_DEVICE}' || { echo 'selected RDMA device ${IB_DEVICE} is unavailable' >&2; exit 1; }; gid_file='/sys/class/infiniband/${IB_DEVICE}/ports/1/gids/${MC_GID_INDEX}'; test -r \"\$gid_file\" || { echo 'selected RDMA GID index ${MC_GID_INDEX} is unavailable on ${IB_DEVICE}' >&2; exit 1; }; gid=\$(cat \"\$gid_file\"); test -n \"\$gid\" && test \"\$gid\" != '0000:0000:0000:0000:0000:0000:0000:0000'"
+    [[ -n "${MOONCAKE_HOSTS[$index]}" ]] || { echo "missing Mooncake host for ${host}" >&2; exit 2; }
+    ssh "${host}" "show_gids | python3 -c \"import ipaddress,sys; rows=[x.split() for x in sys.stdin if x.startswith('${IB_DEVICE}')]; assert any(x[2]=='${MC_GID_INDEX}' and ipaddress.ip_address(x[3])==ipaddress.ip_address('${MOONCAKE_HOSTS[$index]}') for x in rows)\""
     code_hash="$(remote_code_hash "${host}")"
     model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
     image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
@@ -195,7 +201,7 @@ prepare() {
   else
     ssh "${host}" "docker run --rm --network none -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_qwen80b_trace.py --run-nonce '${RUN_ID}' --model '${MODEL_ID}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --max-tokens '${TRACE_MAX_TOKENS}' --output '${RUN_DIR}/trace/trace.jsonl' --manifest '${RUN_DIR}/trace/manifest.json'\""
   fi
-  ssh "${host}" "python3 -c \"import hashlib,json; p='${RUN_DIR}/trace/trace.jsonl'; rows=[json.loads(x) for x in open(p) if x.strip()]; actual=hashlib.sha256(open(p,'rb').read()).hexdigest(); assert len(rows)==${TRACE_REQUESTS}; assert all(r['body']['max_tokens']==${TRACE_MAX_TOKENS} for r in rows); assert '${TRACE_SHA256:-}' in ('',actual); assert '${TRACE_OUTPUT_CONTRACT}' in ('natural','forced_single_token'); assert '${TRACE_OUTPUT_CONTRACT}' != 'natural' or all('forced_token_id' not in r['body'].get('custom_params',{}) and 'forced_text' not in r['body'].get('custom_params',{}) for r in rows)\""
+  ssh "${host}" "python3 -c \"import hashlib,json; p='${RUN_DIR}/trace/trace.jsonl'; rows=[json.loads(x) for x in open(p) if x.strip()]; actual=hashlib.sha256(open(p,'rb').read()).hexdigest(); assert len(rows)==${TRACE_REQUESTS}; assert [r['arrival_offset_s'] for r in rows]==[round(i*float('${TRACE_INTERVAL_SECONDS}'),9) for i in range(${TRACE_REQUESTS})]; assert all(r['ttft_slo_s']==float('${TRACE_LONG_TTFT_SLO_SECONDS}') for r in rows[::2]); assert all(r['ttft_slo_s']==float('${TRACE_SHORT_TTFT_SLO_SECONDS}') for r in rows[1::2]); assert all(r['body']['custom_params']['pd_flip_slo']['ttft_seconds']==r['ttft_slo_s'] for r in rows); assert all(r['body']['max_tokens']==${TRACE_MAX_TOKENS} for r in rows); assert '${TRACE_SHA256:-}' in ('',actual); assert '${TRACE_OUTPUT_CONTRACT}' in ('natural','forced_single_token'); assert '${TRACE_OUTPUT_CONTRACT}' != 'natural' or all('forced_token_id' not in r['body'].get('custom_params',{}) and 'forced_text' not in r['body'].get('custom_params',{}) for r in rows)\""
 }
 
 ensure_cache_namespace() {
@@ -255,6 +261,8 @@ BOOTSTRAP_PORT=${BOOTSTRAP_PORT}
 TRANSFER_BACKEND=${TRANSFER_BACKEND:-mooncake}
 IB_DEVICE=${IB_DEVICE}
 MC_GID_INDEX=${MC_GID_INDEX}
+MC_USE_IPV6=${MC_USE_IPV6:-1}
+MOONCAKE_LOCAL_HOSTNAME=${MOONCAKE_HOSTS[$index]}
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.88}
 GPU_IDS=${GPU_IDS}
 TP_SIZE=${TP_SIZE}

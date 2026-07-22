@@ -164,6 +164,46 @@ class PDFlipPrepareTraceTest(unittest.TestCase):
         self.assertEqual(schedule["output_contract"], "natural")
         self.assertIsNone(schedule["forced_text"])
 
+    def test_prepare_trace_supports_continuous_arrivals_and_per_kind_ttft_slos(self):
+        from scripts.playground.disaggregation.pd_flip_prepare_trace import (
+            prepare_trace,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.jsonl"
+            output = root / "trace.jsonl"
+            manifest = root / "manifest.json"
+            source.write_text(
+                "".join(json.dumps(row) + "\n" for row in self._source_rows()),
+                encoding="utf-8",
+            )
+            prepare_trace(
+                source=source,
+                output=output,
+                manifest=manifest,
+                wave_size=40,
+                wave_gap_seconds=0.0,
+                intra_wave_interval_seconds=0.2,
+                long_ttft_slo_seconds=0.45,
+                short_ttft_slo_seconds=0.25,
+                max_tokens=10000,
+                model="Qwen3-Next-80B-A3B-Instruct",
+                natural_output=True,
+            )
+            rows = [json.loads(line) for line in output.read_text().splitlines()]
+            schedule = json.loads(manifest.read_text())
+
+        self.assertEqual(
+            [row["arrival_offset_s"] for row in rows],
+            [round(i * 0.2, 9) for i in range(40)],
+        )
+        self.assertEqual(rows[-1]["arrival_offset_s"], 7.8)
+        self.assertTrue(all(row["ttft_slo_s"] == 0.45 for row in rows[::2]))
+        self.assertTrue(all(row["ttft_slo_s"] == 0.25 for row in rows[1::2]))
+        self.assertEqual(schedule["long_ttft_slo_seconds"], 0.45)
+        self.assertEqual(schedule["short_ttft_slo_seconds"], 0.25)
+
     def test_apply_output_contract_rejects_incomplete_values(self):
         from scripts.playground.disaggregation.pd_flip_prepare_trace import (
             apply_output_contract,

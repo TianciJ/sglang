@@ -13,12 +13,15 @@ fi
 
 IMAGE="tiancij/sglang-upstream:v0.5.15-clean"
 EXPECTED_IMAGE_ID="sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e"
-TRACE_SHA256="c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d"
-SOURCE_TRACE_SHA256="82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964"
+TRACE_SHA256="${TRACE_SHA256:-c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d}"
+SOURCE_TRACE_SHA256="${SOURCE_TRACE_SHA256:-82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964}"
 TRACE_SOURCE="${TRACE_SOURCE:-${REPO_ROOT}/pd-flip-artifacts/qwen80b-trace40-natural/trace.jsonl}"
 TRACE_MANIFEST_SOURCE="${TRACE_MANIFEST_SOURCE:-$(dirname "${TRACE_SOURCE}")/manifest.json}"
 EXPECTED_REQUESTS=40
 EXPECTED_TOKENS=10000
+TRACE_INTERVAL_SECONDS="${TRACE_INTERVAL_SECONDS:-0.2}"
+TRACE_LONG_TTFT_SLO_SECONDS="${TRACE_LONG_TTFT_SLO_SECONDS:-0.45}"
+TRACE_SHORT_TTFT_SLO_SECONDS="${TRACE_SHORT_TTFT_SLO_SECONDS:-0.25}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-upstream-qwen80b-$(openssl rand -hex 3)}"
 RUN_DIR="${REMOTE_ARTIFACT_ROOT}/${RUN_ID}"
 HELPER_IMAGE="${HELPER_IMAGE:-${IMAGE}}"
@@ -77,6 +80,16 @@ preflight() {
   [[ -f "${TRACE_SOURCE}" ]] || { echo "missing trace: ${TRACE_SOURCE}" >&2; return 2; }
   [[ -f "${TRACE_MANIFEST_SOURCE}" ]] || { echo "missing trace manifest: ${TRACE_MANIFEST_SOURCE}" >&2; return 2; }
   [[ "$(sha256sum "${TRACE_SOURCE}" | awk '{print $1}')" == "${TRACE_SHA256}" ]] || { echo "local trace hash mismatch" >&2; return 2; }
+  python3 - "${TRACE_SOURCE}" "${TRACE_INTERVAL_SECONDS}" "${TRACE_LONG_TTFT_SLO_SECONDS}" "${TRACE_SHORT_TTFT_SLO_SECONDS}" <<'PY'
+import json, sys
+path, interval, long_slo, short_slo = sys.argv[1], *map(float, sys.argv[2:])
+rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+assert len(rows) == 40
+assert [row["arrival_offset_s"] for row in rows] == [round(i * interval, 9) for i in range(40)]
+assert all(row["ttft_slo_s"] == long_slo for row in rows[::2])
+assert all(row["ttft_slo_s"] == short_slo for row in rows[1::2])
+assert all(row["body"]["custom_params"]["pd_flip_slo"]["ttft_seconds"] == row["ttft_slo_s"] for row in rows)
+PY
   local expected_model="" index host image_id model_hash name gpu_list
   gpu_list="${GPU_IDS//,/ }"
   for index in 0 1 2 3; do

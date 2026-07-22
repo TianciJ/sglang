@@ -1,0 +1,20 @@
+{
+  "effective_sha256": "d82d0f7fc5b745f43a48d6d91451794887b4a3f2e5f049d6e7a30a38652c9508",
+  "effective_trace": "pd-flip-artifacts/qwen80b-trace40-5rps-slo025-045/trace.jsonl",
+  "forced_text": null,
+  "forced_token_id": null,
+  "intra_wave_interval_seconds": 0.2,
+  "last_arrival_offset_s": 7.8,
+  "long_ttft_slo_seconds": 0.45,
+  "max_tokens": 10000,
+  "model": "Qwen3-Next-80B-A3B-Instruct",
+  "output_contract": "natural",
+  "request_count": 40,
+  "short_ttft_slo_seconds": 0.25,
+  "source_sha256": "c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d",
+  "source_trace": "pd-flip-artifacts/qwen80b-trace40-natural/trace.jsonl",
+  "tpot_slo_override_seconds": 0.05,
+  "ttft_slo_override_seconds": 0.0,
+  "wave_gap_seconds": 0.0,
+  "wave_size": 40
+}

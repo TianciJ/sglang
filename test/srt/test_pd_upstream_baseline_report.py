@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -30,13 +31,17 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def make_run(root: Path) -> Path:
+    trace = root / "trace" / "trace.jsonl"
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_text('{"request_id":"trace-fixture"}\n', encoding="utf-8")
+    trace_sha256 = hashlib.sha256(trace.read_bytes()).hexdigest()
     manifest = {
         "run_id": "unit-run",
         "mode": "upstream_baseline",
         "validity": "pending",
         "image": "tiancij/sglang-upstream:v0.5.15-clean",
         "image_id": "sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e",
-        "trace_sha256": "c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d",
+        "trace_sha256": trace_sha256,
         "model_id": "Qwen3-Next-80B-A3B-Instruct",
         "model_fingerprint": "model-sha",
         "router_sha256": "router-sha",

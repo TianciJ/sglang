@@ -198,6 +198,8 @@ def prepare_trace(
     wave_gap_seconds: float,
     intra_wave_interval_seconds: float,
     ttft_slo_override_seconds: float = 0.0,
+    long_ttft_slo_seconds: float = 0.0,
+    short_ttft_slo_seconds: float = 0.0,
     tpot_slo_override_seconds: float = 0.0,
     max_tokens: int | None = None,
     forced_text: str | None = None,
@@ -210,24 +212,49 @@ def prepare_trace(
         raise ValueError("wave_size must be positive")
     if wave_gap_seconds < 0 or intra_wave_interval_seconds < 0:
         raise ValueError("trace timing values must be non-negative")
-    if ttft_slo_override_seconds < 0 or tpot_slo_override_seconds < 0:
+    if any(
+        value < 0
+        for value in (
+            ttft_slo_override_seconds,
+            long_ttft_slo_seconds,
+            short_ttft_slo_seconds,
+            tpot_slo_override_seconds,
+        )
+    ):
         raise ValueError("SLO override values must be non-negative")
+    if ttft_slo_override_seconds > 0 and (
+        long_ttft_slo_seconds > 0 or short_ttft_slo_seconds > 0
+    ):
+        raise ValueError(
+            "use either the uniform TTFT override or the long/short overrides"
+        )
+    if (long_ttft_slo_seconds > 0) != (short_ttft_slo_seconds > 0):
+        raise ValueError("long and short TTFT SLO overrides must be set together")
 
     source_rows = _load_jsonl(source)
     _validate_trace(source_rows)
     scheduled_rows = []
     for index, row in enumerate(source_rows):
         scheduled = dict(row)
-        scheduled["arrival_offset_s"] = (index // wave_size) * wave_gap_seconds + (
-            index % wave_size
-        ) * intra_wave_interval_seconds
-        if ttft_slo_override_seconds > 0:
-            scheduled["ttft_slo_s"] = ttft_slo_override_seconds
+        scheduled["arrival_offset_s"] = round(
+            (index // wave_size) * wave_gap_seconds
+            + (index % wave_size) * intra_wave_interval_seconds,
+            9,
+        )
+        effective_ttft_slo = ttft_slo_override_seconds
+        if long_ttft_slo_seconds > 0:
+            effective_ttft_slo = (
+                long_ttft_slo_seconds
+                if scheduled.get("prompt_kind") == "long"
+                else short_ttft_slo_seconds
+            )
+        if effective_ttft_slo > 0:
+            scheduled["ttft_slo_s"] = effective_ttft_slo
             (
                 scheduled.setdefault("body", {})
                 .setdefault("custom_params", {})
                 .setdefault("pd_flip_slo", {})["ttft_seconds"]
-            ) = ttft_slo_override_seconds
+            ) = effective_ttft_slo
         if tpot_slo_override_seconds > 0:
             scheduled["tpot_slo_s"] = tpot_slo_override_seconds
             (
@@ -297,6 +324,8 @@ def prepare_trace(
                 "wave_gap_seconds": wave_gap_seconds,
                 "intra_wave_interval_seconds": intra_wave_interval_seconds,
                 "ttft_slo_override_seconds": ttft_slo_override_seconds,
+                "long_ttft_slo_seconds": long_ttft_slo_seconds,
+                "short_ttft_slo_seconds": short_ttft_slo_seconds,
                 "tpot_slo_override_seconds": tpot_slo_override_seconds,
                 "last_arrival_offset_s": reloaded[-1]["arrival_offset_s"],
                 "max_tokens": max_tokens,
@@ -322,6 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wave-gap-seconds", type=float, required=True)
     parser.add_argument("--intra-wave-interval-seconds", type=float, required=True)
     parser.add_argument("--ttft-slo-override-seconds", type=float, default=0.0)
+    parser.add_argument("--long-ttft-slo-seconds", type=float, default=0.0)
+    parser.add_argument("--short-ttft-slo-seconds", type=float, default=0.0)
     parser.add_argument("--tpot-slo-override-seconds", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, required=True)
     parser.add_argument("--forced-text")
@@ -344,6 +375,8 @@ def main() -> None:
             wave_gap_seconds=args.wave_gap_seconds,
             intra_wave_interval_seconds=args.intra_wave_interval_seconds,
             ttft_slo_override_seconds=args.ttft_slo_override_seconds,
+            long_ttft_slo_seconds=args.long_ttft_slo_seconds,
+            short_ttft_slo_seconds=args.short_ttft_slo_seconds,
             tpot_slo_override_seconds=args.tpot_slo_override_seconds,
             max_tokens=args.max_tokens,
             model=args.model,
@@ -375,6 +408,8 @@ def main() -> None:
         wave_gap_seconds=args.wave_gap_seconds,
         intra_wave_interval_seconds=args.intra_wave_interval_seconds,
         ttft_slo_override_seconds=args.ttft_slo_override_seconds,
+        long_ttft_slo_seconds=args.long_ttft_slo_seconds,
+        short_ttft_slo_seconds=args.short_ttft_slo_seconds,
         tpot_slo_override_seconds=args.tpot_slo_override_seconds,
         max_tokens=args.max_tokens,
         forced_text=args.forced_text,
