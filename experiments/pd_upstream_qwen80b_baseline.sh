@@ -48,12 +48,12 @@ require_secret() {
 }
 
 assert_fixed_config() {
-  [[ "${GPU_IDS}" == "0,1,2,3" ]] || { echo "GPU_IDS must be 0,1,2,3" >&2; return 2; }
-  [[ "${TP_SIZE}" == "4" && "${DP_SIZE}" == "1" ]] || { echo "TP_SIZE=4 and DP_SIZE=1 are required" >&2; return 2; }
+  [[ "${GPU_IDS}" == "0,1" ]] || { echo "GPU_IDS must be 0,1" >&2; return 2; }
+  [[ "${TP_SIZE}" == "2" && "${DP_SIZE}" == "1" ]] || { echo "TP_SIZE=2 and DP_SIZE=1 are required" >&2; return 2; }
   [[ "${ROLES[*]}" == "prefill decode decode decode" ]] || { echo "roles must be 1P3D" >&2; return 2; }
-  [[ "${IB_DEVICE}" == "mlx5_bond_0" ]] || { echo "IB_DEVICE must be mlx5_bond_0" >&2; return 2; }
-  [[ "${MC_USE_IPV6}" == "1" && "${MC_GID_INDEX}" == "3" ]] || { echo "Mooncake bond0 requires MC_USE_IPV6=1 and MC_GID_INDEX=3" >&2; return 2; }
-  [[ "${MEM_FRACTION_STATIC}" == "0.88" ]] || { echo "MEM_FRACTION_STATIC must be 0.88" >&2; return 2; }
+  [[ "${IB_DEVICE}" == "mlx5_bond_1" ]] || { echo "IB_DEVICE must be mlx5_bond_1" >&2; return 2; }
+  [[ "${MC_USE_IPV6}" == "1" && "${MC_GID_INDEX}" == "3" ]] || { echo "Mooncake bond1 requires MC_USE_IPV6=1 and MC_GID_INDEX=3" >&2; return 2; }
+  [[ "${MEM_FRACTION_STATIC}" == "0.80" ]] || { echo "MEM_FRACTION_STATIC must be 0.80" >&2; return 2; }
   [[ "${RUN_ID}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { echo "invalid RUN_ID" >&2; return 2; }
 }
 
@@ -95,8 +95,8 @@ preflight() {
     [[ "${model_hash}" == "${expected_model}" ]] || { echo "${host}: model fingerprint mismatch" >&2; return 2; }
     ssh "${host}" "for gpu in ${gpu_list}; do test -z \"\$(nvidia-smi -i \"\$gpu\" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' || true)\" || { echo GPU \$gpu busy >&2; exit 1; }; done"
     ssh "${host}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${WORKER_PORT}|:${BOOTSTRAP_PORT})$'"
-    ssh "${host}" "ibv_devinfo -d '${IB_DEVICE}' >/dev/null; show_gids | python3 -c \"import ipaddress,sys; rows=[x.split() for x in sys.stdin if x.startswith('${IB_DEVICE}')]; assert any(x[2]=='${MC_GID_INDEX}' and ipaddress.ip_address(x[3])==ipaddress.ip_address('${MOONCAKE_HOSTS[$index]}') for x in rows)\"; ip -6 addr show dev bond0 | grep -F '${MOONCAKE_HOSTS[$index]}/' >/dev/null"
-    ssh "${host}" "docker_root=\$(docker info --format '{{.DockerRootDir}}'); nvidia-smi -L; nvidia-smi --query-gpu=index,uuid,memory.total,memory.used --format=csv,noheader; df -h '${MODEL_PATH}' \"\${docker_root}\"; docker ps --no-trunc; ps -eo pid,user,args --sort=pid | grep -E 'sglang|mooncake|sgl-router' | grep -v grep || true; ip -brief address; show_gids | grep -E '^${IB_DEVICE}[[:space:]]+1[[:space:]]+${MC_GID_INDEX}[[:space:]]+'; ibv_devinfo -d '${IB_DEVICE}' | sed -n '1,80p'; date --iso-8601=ns; chronyc tracking 2>/dev/null || true"
+    ssh "${host}" "ibv_devinfo -d '${IB_DEVICE}' >/dev/null; show_gids | python3 -c \"import ipaddress,sys; rows=[x.split() for x in sys.stdin if x.startswith('${IB_DEVICE}')]; assert any(x[2]=='${MC_GID_INDEX}' and ipaddress.ip_address(x[3])==ipaddress.ip_address('${MOONCAKE_HOSTS[$index]}') for x in rows)\"; ip -6 addr show dev bond1 | grep -F '${MOONCAKE_HOSTS[$index]}/' >/dev/null"
+    ssh "${host}" "docker_root=\$(docker info --format '{{.DockerRootDir}}'); nvidia-smi -L; nvidia-smi --query-gpu=index,uuid,memory.total,memory.used --format=csv,noheader; df -h '${MODEL_PATH}' \"\${docker_root}\"; docker ps --format '{{.Names}} {{.Status}} {{.Image}}'; ps -eo pid,user,comm --sort=pid | grep -E 'sglang|mooncake|sgl-router' || true; ip -brief address; show_gids | grep -E '^${IB_DEVICE}[[:space:]]+1[[:space:]]+${MC_GID_INDEX}[[:space:]]+'; ibv_devinfo -d '${IB_DEVICE}' | sed -n '1,80p'; date --iso-8601=ns; chronyc tracking 2>/dev/null || true"
   done
   ssh "${SSH_HOSTS[0]}" "! ss -ltn | awk '{print \$4}' | grep -Eq '(:${ROUTER_PORT})$'"
   echo "preflight passed; model_fingerprint=${expected_model}"

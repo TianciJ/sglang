@@ -198,16 +198,22 @@ def test_env_example_contains_no_real_secret_and_fixed_topology():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "ADMIN_API_KEY=replace-with-a-private-secret" in text
     assert "ADMIN_API_KEY_FILE=" in text
-    assert "GPU_IDS=0,1,2,3" in text
-    assert "TP_SIZE=4" in text
+    assert "GPU_IDS=0,1" in text
+    assert "TP_SIZE=2" in text
     assert "DP_SIZE=1" in text
     assert "NODE0_ROLE=prefill" in text
     assert text.count("_ROLE=decode") == 3
-    assert "IB_DEVICE=mlx5_bond_0" in text
+    assert "IB_DEVICE=mlx5_bond_1" in text
     assert "MC_USE_IPV6=1" in text
     assert "MC_GID_INDEX=3" in text
-    for suffix in ("6240", "7b80", "6600", "5f00"):
+    for suffix in ("6241", "7b81", "6601", "5f01"):
         assert f"fd03:4514:80:{suffix}::1" in text
+
+
+def test_preflight_does_not_dump_full_process_arguments_or_secrets():
+    text = source()
+    assert "ps -eo pid,user,args" not in text
+    assert "ps -eo pid,user,comm" in text
 
 
 def test_can_load_admin_key_from_private_file_without_printing_it():

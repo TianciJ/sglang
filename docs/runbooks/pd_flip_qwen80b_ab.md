@@ -18,7 +18,9 @@ At the time this harness was prepared, `Qwen3-Next-80B-A3B-Instruct` was known t
 ## Frozen quick-validation configuration
 
 - Four nodes: cloud-099, cloud-100, cloud-101, cloud-102.
-- Four selected GPUs per node: `0,1,2,3`; TP=4 and DP=1.
+- Two selected GPUs per node: `0,1`; TP=2 and DP=1 for the current
+  long-Prefill performance run. Historical TP=4 runs remain valid only as
+  operational references, not matched comparisons with this configuration.
 - Initial roles: node0=P, node1=D, node2=D, node3=D.
 - Fixed migration pair: node2 source D to node3 target D; node2 becomes P.
 - 40 requests: 20 short prompts near 1,000 Chinese characters and 20 long prompts near 10,000 characters, interleaved.

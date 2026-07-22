@@ -47,12 +47,14 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         for value in (
             "MODEL_ID=Qwen3-Next-80B-A3B-Instruct",
             "MODEL_PATH=/models/Qwen3-Next-80B-A3B-Instruct",
-            "TP_SIZE=4",
+            "TP_SIZE=2",
             "DP_SIZE=1",
             "IB_DEVICE=mlx5_bond_1",
             "MC_GID_INDEX=3",
             "TRACE_REQUESTS=40",
             "TRACE_MAX_TOKENS=10000",
+            "TRACE_OUTPUT_CONTRACT=natural",
+            "ENABLE_CUSTOM_LOGIT_PROCESSOR=0",
             "TRACE_INTRA_WAVE_INTERVAL_SECONDS=0.5",
             "TRACE_WAVE_START_INTERVAL_SECONDS=7.5",
             "PD_FLIP_FIRST_MIGRATION_RATIO=0.5",
@@ -69,6 +71,20 @@ class Qwen80BABRunnerTest(unittest.TestCase):
             self.assertIn(value, source)
         runner_source = RUNNER.read_text(encoding="utf-8")
         self.assertIn('IB_DEVICE="${IB_DEVICE:-mlx5_bond_1}"', runner_source)
+
+    def test_runner_can_copy_and_validate_a_frozen_natural_trace(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn('if [[ -n "${TRACE_SOURCE:-}" ]]', source)
+        self.assertIn('scp "${TRACE_SOURCE}"', source)
+        self.assertIn("TRACE_SHA256", source)
+        self.assertIn("TRACE_OUTPUT_CONTRACT", source)
+        self.assertIn(
+            'ENABLE_CUSTOM_LOGIT_PROCESSOR="${ENABLE_CUSTOM_LOGIT_PROCESSOR:-1}"',
+            source,
+        )
+        self.assertIn(
+            "ENABLE_CUSTOM_LOGIT_PROCESSOR=${ENABLE_CUSTOM_LOGIT_PROCESSOR}", source
+        )
 
     def test_runner_has_separate_clean_baseline_and_state_machine_launches(self):
         source = RUNNER.read_text(encoding="utf-8")
@@ -145,7 +161,10 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         end = source.index("\n}\n\ncollect_and_stop", start)
         workload_body = source[start:end]
 
-        self.assertIn("cd '${SGLANG_REPO}'; nohup env", sampler_body)
+        self.assertIn(
+            "cd '${SGLANG_REPO}'; source '${RUN_DIR}/${mode}/node0.env'; nohup env",
+            sampler_body,
+        )
         self.assertNotIn("cd '${SGLANG_REPO}' && nohup env", sampler_body)
         self.assertIn("start_observer_container", workload_body)
         self.assertIn("start_controller_container", workload_body)
@@ -172,7 +191,8 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn("helper_name()", source)
         self.assertIn("docker wait", source)
-        self.assertIn("docker rm -f", source)
+        self.assertNotIn("docker rm -f", source)
+        self.assertIn("docker stop --time 300", source)
         self.assertNotIn("pd_flip_slo_observer.py'; do", source)
 
     def test_worker_supports_explicit_gpu_and_feature_gates(self):

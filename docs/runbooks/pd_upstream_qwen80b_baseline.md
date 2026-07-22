@@ -10,8 +10,8 @@ Prefill-donor, or modified router code enters the inference data plane.
 - Image: `tiancij/sglang-upstream:v0.5.15-clean`.
 - Image ID: `sha256:7dd92779d739364d79af34af65815ddc14e567728e5256f65ac922367161213e`.
 - Model: `Qwen3-Next-80B-A3B-Instruct`.
-- Placement: four nodes, GPUs `0,1,2,3`, TP 4, DP 1, `1P3D`.
-- RDMA: active `mlx5_bond_0` on every node, per-node bond IPv6 address,
+- Placement: four nodes, GPUs `0,1`, TP 2, DP 1, `1P3D`.
+- RDMA: active `mlx5_bond_1` on every node, per-node bond IPv6 address,
   `MC_USE_IPV6=1`, and GID index 3.
 - Natural-output trace SHA256: `c5dbbf75c997dfc5d67a18251082f2f246d6c055eb4af5040fbe147f49f4ce5d`.
 - Source trace SHA256: `82da848d68c9662a7aaaf76deb547b1d8cc6c4f562586f0d60dd212bc114e964`.

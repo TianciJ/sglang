@@ -22,6 +22,8 @@ MC_GID_INDEX="${MC_GID_INDEX:-}"
 TRACE_REQUESTS="${TRACE_REQUESTS:-40}"
 TRACE_MAX_TOKENS="${TRACE_MAX_TOKENS:-10000}"
 TRACE_FORCED_TEXT="${TRACE_FORCED_TEXT:-的}"
+TRACE_OUTPUT_CONTRACT="${TRACE_OUTPUT_CONTRACT:-forced_single_token}"
+ENABLE_CUSTOM_LOGIT_PROCESSOR="${ENABLE_CUSTOM_LOGIT_PROCESSOR:-1}"
 PD_FLIP_FIRST_MIGRATION_RATIO="${PD_FLIP_FIRST_MIGRATION_RATIO:-0.5}"
 PD_FLIP_OBSERVATION_SECONDS="${PD_FLIP_OBSERVATION_SECONDS:-3}"
 SLO_WINDOW_SECONDS="${SLO_WINDOW_SECONDS:-10}"
@@ -111,7 +113,7 @@ on_failure() {
   local component helper
   for component in warmup observer controller; do
     helper="$(helper_name "${mode}" "${component}")"
-    ssh "${SSH_HOSTS[0]}" "if docker inspect '${helper}' >/dev/null 2>&1; then docker logs --timestamps '${helper}' >> '${RUN_DIR}/${mode}/logs/${component}.log' 2>&1 || true; docker rm -f '${helper}' >/dev/null; fi"
+    ssh "${SSH_HOSTS[0]}" "if docker inspect '${helper}' >/dev/null 2>&1; then docker logs --timestamps '${helper}' >> '${RUN_DIR}/${mode}/logs/${component}.log' 2>&1 || true; state=\$(docker inspect '${helper}' --format '{{.State.Status}}'); case \"\$state\" in running|paused|restarting) docker stop --time 300 '${helper}' >/dev/null ;; esac; docker rm '${helper}' >/dev/null; fi"
   done
   local router
   router="$(router_name "${mode}")"
@@ -184,8 +186,16 @@ prepare() {
       ssh "${SSH_HOSTS[$index]}" "mkdir -p '${COMPILE_CACHE_ROOT}/${CACHE_NAMESPACE}'"
     done
   fi
-  ssh "${host}" "docker run --rm --network none -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_qwen80b_trace.py --run-nonce '${RUN_ID}' --model '${MODEL_ID}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --max-tokens '${TRACE_MAX_TOKENS}' --output '${RUN_DIR}/trace/trace.jsonl' --manifest '${RUN_DIR}/trace/manifest.json'\""
-  ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/trace/trace.jsonl'; rows=[json.loads(x) for x in open(p) if x.strip()]; assert len(rows)==${TRACE_REQUESTS}; assert all(r['body']['max_tokens']==${TRACE_MAX_TOKENS} for r in rows)\""
+  if [[ -n "${TRACE_SOURCE:-}" ]]; then
+    [[ -f "${TRACE_SOURCE}" && -f "${TRACE_MANIFEST_SOURCE}" ]] || { echo "missing frozen trace or manifest" >&2; return 2; }
+    [[ -n "${TRACE_SHA256:-}" ]] || { echo "TRACE_SHA256 is required with TRACE_SOURCE" >&2; return 2; }
+    [[ "$(sha256sum "${TRACE_SOURCE}" | awk '{print $1}')" == "${TRACE_SHA256}" ]] || { echo "local frozen trace hash mismatch" >&2; return 2; }
+    scp "${TRACE_SOURCE}" "${host}:${RUN_DIR}/trace/trace.jsonl" >/dev/null
+    scp "${TRACE_MANIFEST_SOURCE}" "${host}:${RUN_DIR}/trace/manifest.json" >/dev/null
+  else
+    ssh "${host}" "docker run --rm --network none -v '${SGLANG_REPO}:/sgl-workspace/sglang:ro' -v '${MODEL_PATH}:${MODEL_PATH}:ro' -v '${RUN_DIR}:${RUN_DIR}' '${IMAGE}' bash -lc \"cd /sgl-workspace/sglang && PYTHONPATH=python:. python3 scripts/playground/disaggregation/pd_flip_qwen80b_trace.py --run-nonce '${RUN_ID}' --model '${MODEL_ID}' --forced-text '${TRACE_FORCED_TEXT}' --tokenizer-path '${MODEL_PATH}' --max-tokens '${TRACE_MAX_TOKENS}' --output '${RUN_DIR}/trace/trace.jsonl' --manifest '${RUN_DIR}/trace/manifest.json'\""
+  fi
+  ssh "${host}" "python3 -c \"import hashlib,json; p='${RUN_DIR}/trace/trace.jsonl'; rows=[json.loads(x) for x in open(p) if x.strip()]; actual=hashlib.sha256(open(p,'rb').read()).hexdigest(); assert len(rows)==${TRACE_REQUESTS}; assert all(r['body']['max_tokens']==${TRACE_MAX_TOKENS} for r in rows); assert '${TRACE_SHA256:-}' in ('',actual); assert '${TRACE_OUTPUT_CONTRACT}' in ('natural','forced_single_token'); assert '${TRACE_OUTPUT_CONTRACT}' != 'natural' or all('forced_token_id' not in r['body'].get('custom_params',{}) and 'forced_text' not in r['body'].get('custom_params',{}) for r in rows)\""
 }
 
 ensure_cache_namespace() {
@@ -251,7 +261,7 @@ TP_SIZE=${TP_SIZE}
 DP_SIZE=${DP_SIZE}
 ${cache_env}
 ENABLE_DP_ATTENTION=${ENABLE_DP_ATTENTION:-0}
-ENABLE_CUSTOM_LOGIT_PROCESSOR=1
+ENABLE_CUSTOM_LOGIT_PROCESSOR=${ENABLE_CUSTOM_LOGIT_PROCESSOR}
 ENABLE_REQUEST_TIME_STATS_LOGGING=1
 ENABLE_PD_FLIP_HICACHE_STITCH=0
 ENABLE_PD_FLIP_PREFILL_DONOR=0
@@ -305,7 +315,7 @@ write_mode_manifest() {
   if [[ "${ENABLE_DP_ATTENTION:-0}" == "1" ]]; then
     dp_attention_enabled=true
   fi
-  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"code_revision\":\"${code_revision}\",\"router_binary_hash\":\"${router_binary_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"ib_device\":\"${IB_DEVICE}\",\"mc_gid_index\":${MC_GID_INDEX},\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
+  content="{\"run_id\":\"${RUN_ID}\",\"mode\":\"${mode}\",\"trace_sha256\":\"${trace_sha}\",\"output_contract\":\"${TRACE_OUTPUT_CONTRACT}\",\"model_id\":\"${MODEL_ID}\",\"model_fingerprint\":\"${model_hash}\",\"code_hash\":\"${code_hash}\",\"code_revision\":\"${code_revision}\",\"router_binary_hash\":\"${router_binary_hash}\",\"image_id\":\"${image_id}\",\"gpu_ids\":\"${GPU_IDS}\",\"gpu_model\":\"${gpu_model}\",\"driver_version\":\"${driver_version}\",\"tp_size\":${TP_SIZE},\"dp_size\":${DP_SIZE},\"mem_fraction_static\":${MEM_FRACTION_STATIC:-0.88},\"dp_attention_enabled\":${dp_attention_enabled},\"transfer_backend\":\"${TRANSFER_BACKEND:-mooncake}\",\"ib_device\":\"${IB_DEVICE}\",\"mc_gid_index\":${MC_GID_INDEX},\"extra_sglang_args\":\"${EXTRA_SGLANG_ARGS:-}\",\"initial_topology\":\"${topology}\",\"state_machine_enabled\":${state_enabled},\"runtime_role_switch_enabled\":${role_switch_enabled},\"candidate_prefill_warmup_enabled\":${candidate_warmup},\"warmup_profile_version\":\"${WARMUP_PROFILE_VERSION}\",\"compile_cache_namespace\":\"${CACHE_NAMESPACE}\",\"compile_cache_provenance_hash\":\"${CACHE_PROVENANCE_HASH}\",\"compile_cache_root\":\"${COMPILE_CACHE_ROOT}\",\"compile_cache_container_dir\":\"${COMPILE_CACHE_CONTAINER_DIR}\",\"compile_cache_snapshot_before\":${cache_snapshot_before},\"compile_cache_snapshot_after_warmup\":${cache_snapshot_after_warmup},\"hicache_stitch_enabled\":false,\"prefill_donor_enabled\":false,\"slo_window_seconds\":${SLO_WINDOW_SECONDS},\"slo_enter_threshold\":${SLO_ENTER_THRESHOLD},\"slo_recover_threshold\":${SLO_RECOVER_THRESHOLD},\"first_migration_ratio\":${PD_FLIP_FIRST_MIGRATION_RATIO},\"observation_seconds\":${PD_FLIP_OBSERVATION_SECONDS}}"
   encoded="$(printf '%s\n' "${content}" | base64 | tr -d '\n')"
   ssh "${host}" "printf '%s' '${encoded}' | base64 -d > '${RUN_DIR}/${mode}/manifest.json'"
 }
@@ -365,7 +375,7 @@ start_sampler() {
   for index in 0 1 2 3; do
     node_args+=" --node 'name=node${index},worker_url=http://${NODE_IPS[$index]}:${PORT}'"
   done
-  ssh "${host}" "cd '${SGLANG_REPO}'; nohup env ADMIN_API_KEY='${ADMIN_API_KEY}' python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url 'http://127.0.0.1:${ROUTER_PORT}' ${node_args} --output-events '${RUN_DIR}/${mode}/raw/migration_events.jsonl' --interval-seconds '${MIGRATION_SAMPLE_INTERVAL_SECONDS:-0.05}' --duration-seconds '${MEASUREMENT_DURATION_SECONDS:-7200}' --api-key-env ADMIN_API_KEY > '${RUN_DIR}/${mode}/logs/migration_sampler.log' 2>&1 < /dev/null & echo \$! > '${RUN_DIR}/${mode}/pids/migration_sampler.pid'"
+  ssh "${host}" "cd '${SGLANG_REPO}'; source '${RUN_DIR}/${mode}/node0.env'; nohup env ADMIN_API_KEY=\"\${ADMIN_API_KEY}\" python3 scripts/playground/disaggregation/pd_flip_migration_measure.py sample --router-url 'http://127.0.0.1:${ROUTER_PORT}' ${node_args} --output-events '${RUN_DIR}/${mode}/raw/migration_events.jsonl' --interval-seconds '${MIGRATION_SAMPLE_INTERVAL_SECONDS:-0.05}' --duration-seconds '${MEASUREMENT_DURATION_SECONDS:-7200}' --api-key-env ADMIN_API_KEY > '${RUN_DIR}/${mode}/logs/migration_sampler.log' 2>&1 < /dev/null & echo \$! > '${RUN_DIR}/${mode}/pids/migration_sampler.pid'"
 }
 
 start_observer_container() {
@@ -406,7 +416,7 @@ summarize_measurements() {
 
 finalize_controller_contract() {
   local mode="state_machine" host="${SSH_HOSTS[0]}"
-  ssh "${host}" "curl -fsS -H 'Authorization: Bearer ${ADMIN_API_KEY}' 'http://127.0.0.1:${ROUTER_PORT}/pd_flip/router/workers' > '${RUN_DIR}/${mode}/controller/final_router.json'"
+  ssh "${host}" "source '${RUN_DIR}/${mode}/node0.env'; curl -fsS -H \"Authorization: Bearer \${ADMIN_API_KEY}\" 'http://127.0.0.1:${ROUTER_PORT}/pd_flip/router/workers' > '${RUN_DIR}/${mode}/controller/final_router.json'"
   ssh "${host}" "python3 -c \"import json; p='${RUN_DIR}/${mode}/controller/result.json'; q='${RUN_DIR}/${mode}/controller/final_router.json'; d=json.load(open(p)); r=json.load(open(q)); roles=[str(x.get('role','')).lower() for x in r.get('workers',[])]; d.update(first_migration_ratio=${PD_FLIP_FIRST_MIGRATION_RATIO}, observation_seconds=float(${PD_FLIP_OBSERVATION_SECONDS}), final_topology=f'{roles.count(\"prefill\")}P{roles.count(\"decode\")}D'); open(p,'w').write(json.dumps(d,indent=2,sort_keys=True)+'\\n')\""
 }
 
