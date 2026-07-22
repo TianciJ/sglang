@@ -145,6 +145,25 @@ class CandidatePrefillWarmupTest(unittest.TestCase):
                 workers, expected_prefill=1, expected_decode=3
             )
 
+    def test_validate_router_topology_supports_1p15d(self):
+        workers = {
+            "workers": [
+                {"worker_id": "worker-0", "role": "prefill", "draining": False}
+            ]
+            + [
+                {
+                    "worker_id": "worker-{}".format(index),
+                    "role": "decode",
+                    "draining": False,
+                }
+                for index in range(1, 16)
+            ]
+        }
+
+        self.require_api("validate_router_topology")(
+            workers, expected_prefill=1, expected_decode=15
+        )
+
     def test_validate_router_warmup_target_requires_one_routable_prefill(self):
         workers = {
             "workers": [

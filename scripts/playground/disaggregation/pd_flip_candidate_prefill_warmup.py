@@ -332,6 +332,13 @@ class CandidatePrefillWarmup:
     ):
         self.router_url = router_url.rstrip("/")
         self.nodes = {node.name: node for node in nodes}
+        if len(self.nodes) < 3:
+            raise ValueError("candidate Prefill warmup requires at least three workers")
+        self.expected_prefill = 1
+        self.expected_decode = len(self.nodes) - 1
+        self.expected_topology = "{}P{}D".format(
+            self.expected_prefill, self.expected_decode
+        )
         self.initial_prefill = self.nodes[initial_prefill_name]
         self.candidates = [self.nodes[name] for name in candidate_names]
         self.selected_rows = selected_rows
@@ -695,12 +702,25 @@ class CandidatePrefillWarmup:
                 {"internal_states": server_info.get("internal_states")},
             )
         router = self.client.get_json(self.router_url, "/pd_flip/router/workers")
-        validate_router_topology(router, expected_prefill=1, expected_decode=3)
+        validate_router_topology(
+            router,
+            expected_prefill=getattr(self, "expected_prefill", 1),
+            expected_decode=getattr(self, "expected_decode", len(self.nodes) - 1),
+        )
         self._save_json("status/router-final.json", router)
 
     def run(self) -> JsonDict:
+        expected_prefill = getattr(self, "expected_prefill", 1)
+        expected_decode = getattr(self, "expected_decode", len(self.nodes) - 1)
+        expected_topology = getattr(
+            self, "expected_topology", "{}P{}D".format(expected_prefill, expected_decode)
+        )
         initial_router = self.client.get_json(self.router_url, "/pd_flip/router/workers")
-        validate_router_topology(initial_router, expected_prefill=1, expected_decode=3)
+        validate_router_topology(
+            initial_router,
+            expected_prefill=expected_prefill,
+            expected_decode=expected_decode,
+        )
         self._save_json("status/router-initial.json", initial_router)
         self.journal.write(
             "candidate_prefill_warmup_start",
@@ -722,8 +742,8 @@ class CandidatePrefillWarmup:
         summary = {
             "success": True,
             "measured": False,
-            "initial_topology": "1P3D",
-            "final_topology": "1P3D",
+            "initial_topology": expected_topology,
+            "final_topology": expected_topology,
             "candidate_names": [node.name for node in self.candidates],
             "warmup_request_count": len(results),
             "warmup_requests": results,
