@@ -239,7 +239,9 @@ def test_can_load_admin_key_from_private_file_without_printing_it():
     text = source()
     assert 'if [[ -n "${ADMIN_API_KEY_FILE:-}" ]]' in text
     assert '[[ -r "${ADMIN_API_KEY_FILE}" ]]' in text
-    assert 'ADMIN_API_KEY="${ADMIN_API_KEY#ADMIN_API_KEY=}"' in text
+    assert "grep -q '^ADMIN_API_KEY='" in text
+    assert "sed -n 's/^ADMIN_API_KEY=//p'" in text
+    assert "tail -n 1" in text
 
 
 def test_collected_logs_redact_server_args_key_and_teardown_removes_secret_envs():

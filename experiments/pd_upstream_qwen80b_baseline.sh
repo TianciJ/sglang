@@ -7,8 +7,11 @@ source "${ENV_FILE:-${SCRIPT_DIR}/pd_upstream_qwen80b_baseline.env.example}"
 
 if [[ -n "${ADMIN_API_KEY_FILE:-}" ]]; then
   [[ -r "${ADMIN_API_KEY_FILE}" ]] || { echo "ADMIN_API_KEY_FILE is not readable" >&2; exit 2; }
-  ADMIN_API_KEY="$(tr -d '\r\n' < "${ADMIN_API_KEY_FILE}")"
-  ADMIN_API_KEY="${ADMIN_API_KEY#ADMIN_API_KEY=}"
+  if grep -q '^ADMIN_API_KEY=' "${ADMIN_API_KEY_FILE}"; then
+    ADMIN_API_KEY="$(sed -n 's/^ADMIN_API_KEY=//p' "${ADMIN_API_KEY_FILE}" | tail -n 1 | tr -d '\r\n')"
+  else
+    ADMIN_API_KEY="$(tr -d '\r\n' < "${ADMIN_API_KEY_FILE}")"
+  fi
 fi
 
 IMAGE="tiancij/sglang-upstream:v0.5.15-clean"
