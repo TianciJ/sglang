@@ -40,6 +40,8 @@ class TP2FiveRPSPairRunnerTest(unittest.TestCase):
             'observer.get("first_trigger")',
             "write_pair_design",
             "validate_pair_provenance",
+            "BASELINE_RUN_ID_OVERRIDE",
+            "run-state-only",
             '"model_fingerprint"',
             '"mooncake_hosts"',
         ):

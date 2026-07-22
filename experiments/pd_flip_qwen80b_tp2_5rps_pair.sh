@@ -6,8 +6,8 @@ PAIR_ENV_FILE="${PAIR_ENV_FILE:-${SCRIPT_DIR}/pd_flip_qwen80b_tp2_5rps_pair.env.
 source "${PAIR_ENV_FILE}"
 
 PAIR_ID="${PAIR_ID:-$(date -u +%Y%m%dT%H%M%SZ)-qwen80b-tp2-5rps-pair}"
-BASELINE_RUN_ID="${PAIR_ID}-upstream"
-STATE_RUN_ID="${PAIR_ID}-state"
+BASELINE_RUN_ID="${BASELINE_RUN_ID_OVERRIDE:-${PAIR_ID}-upstream}"
+STATE_RUN_ID="${STATE_RUN_ID_OVERRIDE:-${PAIR_ID}-state}"
 PAIR_DIR="${ARTIFACT_ROOT}/${PAIR_ID}-pair"
 UPSTREAM_RUNNER="${SCRIPT_DIR}/pd_upstream_qwen80b_baseline.sh"
 STATE_RUNNER="${SCRIPT_DIR}/pd_flip_qwen80b_ab.sh"
@@ -93,6 +93,13 @@ preflight() {
   validate_pair_config
   common_env
   RUN_ID="${BASELINE_RUN_ID}" ENV_FILE="${UPSTREAM_ENV_FILE}" "${UPSTREAM_RUNNER}" preflight
+  state_env
+  RUN_ID="${STATE_RUN_ID}" ENV_FILE="${STATE_ENV_FILE}" "${STATE_RUNNER}" preflight
+}
+
+preflight_state_only() {
+  load_admin_key
+  validate_pair_config
   state_env
   RUN_ID="${STATE_RUN_ID}" ENV_FILE="${STATE_ENV_FILE}" "${STATE_RUNNER}" preflight
 }
@@ -258,10 +265,22 @@ run_pair() {
   write_pair_summary
 }
 
+run_state_only() {
+  validate_baseline
+  preflight_state_only
+  write_pair_design
+  RUN_ID="${STATE_RUN_ID}" ENV_FILE="${STATE_ENV_FILE}" "${STATE_RUNNER}" prepare
+  RUN_ID="${STATE_RUN_ID}" ENV_FILE="${STATE_ENV_FILE}" "${STATE_RUNNER}" state-machine
+  validate_state
+  validate_pair_provenance
+  write_pair_summary
+}
+
 case "${1:-}" in
   validate) validate_pair_config ;;
   preflight) preflight ;;
   run) run_pair ;;
+  run-state-only) run_state_only ;;
   report) validate_baseline; validate_state; validate_pair_provenance; write_pair_summary ;;
-  *) echo "usage: $0 validate|preflight|run|report" >&2; exit 2 ;;
+  *) echo "usage: $0 validate|preflight|run|run-state-only|report" >&2; exit 2 ;;
 esac

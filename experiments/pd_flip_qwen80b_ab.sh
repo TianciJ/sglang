@@ -306,7 +306,7 @@ write_mode_manifest() {
     state_enabled=true
     role_switch_enabled=true
   fi
-  trace_sha="$(ssh "${host}" "python3 -c \"import json; print(json.load(open('${RUN_DIR}/trace/manifest.json'))['trace_sha256'])\"")"
+  trace_sha="$(ssh "${host}" "sha256sum '${RUN_DIR}/trace/trace.jsonl' | awk '{print \$1}'")"
   code_hash="$(remote_code_hash "${host}")"
   code_revision="$(remote_code_revision "${host}")"
   router_binary_hash="$(ssh "${host}" "sha256sum '${SGLANG_REPO}/experimental/sgl-router/target/release/sgl-router' | awk '{print \$1}'")"
