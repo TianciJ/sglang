@@ -69,7 +69,7 @@ remote_code_revision() {
 cache_provenance_material() {
   local host="$1" code_hash model_hash image_id selected_gpus
   code_hash="$(remote_code_hash "${host}")"
-  model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
+  model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json' '${MODEL_PATH}/tokenizer.json'; find '${MODEL_PATH}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
   image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
   selected_gpus="$(ssh "${host}" "nvidia-smi -i '${GPU_IDS}' --query-gpu=index,name,compute_cap,driver_version --format=csv,noheader | LC_ALL=C sort")"
   printf '%s' "code=${code_hash}|model=${model_hash}|image=${image_id}|selected_gpus=${selected_gpus}|tp=${TP_SIZE}|dp=${DP_SIZE}|gpu_ids=${GPU_IDS}|mem=${MEM_FRACTION_STATIC:-0.88}|dp_attention=${ENABLE_DP_ATTENTION:-0}|transfer=${TRANSFER_BACKEND:-mooncake}|ib_device=${IB_DEVICE}|mc_gid_index=${MC_GID_INDEX}|extra=${EXTRA_SGLANG_ARGS:-}|profile=${WARMUP_PROFILE_VERSION}"
@@ -161,7 +161,7 @@ preflight() {
     [[ -n "${MOONCAKE_HOSTS[$index]}" ]] || { echo "missing Mooncake host for ${host}" >&2; exit 2; }
     ssh "${host}" "show_gids | python3 -c \"import ipaddress,sys; rows=[x.split() for x in sys.stdin if x.startswith('${IB_DEVICE}')]; assert any(x[2]=='${MC_GID_INDEX}' and ipaddress.ip_address(x[3])==ipaddress.ip_address('${MOONCAKE_HOSTS[$index]}') for x in rows)\""
     code_hash="$(remote_code_hash "${host}")"
-    model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
+    model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json' '${MODEL_PATH}/tokenizer.json'; find '${MODEL_PATH}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
     image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
     if [[ -z "${expected_code}" ]]; then
       expected_code="${code_hash}"; expected_model="${model_hash}"; expected_image="${image_id}"
@@ -310,7 +310,7 @@ write_mode_manifest() {
   code_hash="$(remote_code_hash "${host}")"
   code_revision="$(remote_code_revision "${host}")"
   router_binary_hash="$(ssh "${host}" "sha256sum '${SGLANG_REPO}/experimental/sgl-router/target/release/sgl-router' | awk '{print \$1}'")"
-  model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json'; find '${MODEL_PATH}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
+  model_hash="$(ssh "${host}" "{ sha256sum '${MODEL_PATH}/config.json' '${MODEL_PATH}/tokenizer.json'; find '${MODEL_PATH}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
   image_id="$(ssh "${host}" "docker image inspect '${IMAGE}' --format '{{.Id}}'")"
   gpu_model="$(ssh "${host}" "nvidia-smi -i '${GPU_IDS%%,*}' --query-gpu=name,compute_cap --format=csv,noheader | head -n1")"
   driver_version="$(ssh "${host}" "nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1")"

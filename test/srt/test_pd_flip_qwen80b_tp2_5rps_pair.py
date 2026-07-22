@@ -43,6 +43,8 @@ class TP2FiveRPSPairRunnerTest(unittest.TestCase):
             "BASELINE_RUN_ID_OVERRIDE",
             "run-state-only",
             '"model_fingerprint"',
+            "model_fingerprint_reconciliation.json",
+            "legacy_reconciliation_used",
             '"mooncake_hosts"',
         ):
             self.assertIn(expected, source)

@@ -204,19 +204,65 @@ PY
 }
 
 validate_pair_provenance() {
-  python3 - "${ARTIFACT_ROOT}/${BASELINE_RUN_ID}" "${ARTIFACT_ROOT}/${STATE_RUN_ID}" <<'PY'
+  local model_path canonical_model_fingerprint legacy_state_fingerprint index host canonical legacy
+  model_path="$(env_value "${UPSTREAM_ENV_FILE}" MODEL_PATH)"
+  canonical_model_fingerprint=""
+  legacy_state_fingerprint=""
+  for index in 0 1 2 3; do
+    host="$(env_value "${UPSTREAM_ENV_FILE}" "NODE${index}_SSH")"
+    if [[ -z "${host}" ]]; then
+      case "${index}" in
+        0) host="cloud-099" ;;
+        1) host="cloud-100" ;;
+        2) host="cloud-101" ;;
+        3) host="cloud-102" ;;
+      esac
+    fi
+    canonical="$(ssh "${host}" "{ sha256sum '${model_path}/config.json' '${model_path}/tokenizer.json'; find '${model_path}' -maxdepth 1 -type f -name '*.safetensors' -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
+    legacy="$(ssh "${host}" "{ sha256sum '${model_path}/config.json'; find '${model_path}' -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.bin' \) -printf '%f:%s\\n' | LC_ALL=C sort; } | sha256sum | awk '{print \$1}'")"
+    if [[ -z "${canonical_model_fingerprint}" ]]; then
+      canonical_model_fingerprint="${canonical}"
+      legacy_state_fingerprint="${legacy}"
+    else
+      [[ "${canonical}" == "${canonical_model_fingerprint}" && "${legacy}" == "${legacy_state_fingerprint}" ]] || die "live model fingerprint mismatch at ${host}"
+    fi
+  done
+  python3 - "${ARTIFACT_ROOT}/${BASELINE_RUN_ID}" "${ARTIFACT_ROOT}/${STATE_RUN_ID}" "${PAIR_DIR}" "${canonical_model_fingerprint}" "${legacy_state_fingerprint}" <<'PY'
 import json, pathlib, sys
-baseline, state = map(pathlib.Path, sys.argv[1:])
+baseline, state, pair_dir = map(pathlib.Path, sys.argv[1:4])
+canonical, legacy = sys.argv[4:]
 b = json.load(open(baseline / "manifest.json"))
 s = json.load(open(state / "state_machine" / "manifest.json"))
 keys = (
-    "trace_sha256", "model_id", "model_fingerprint", "gpu_ids", "tp_size",
+    "trace_sha256", "model_id", "gpu_ids", "tp_size",
     "dp_size", "mem_fraction_static", "ib_device", "mc_gid_index",
     "mc_use_ipv6", "mooncake_hosts", "worker_port", "router_port",
     "bootstrap_port", "output_contract",
 )
 mismatches = {key: [b.get(key), s.get(key)] for key in keys if b.get(key) != s.get(key)}
 assert not mismatches, f"baseline/state provenance mismatch: {mismatches}"
+baseline_raw = b.get("model_fingerprint")
+state_raw = s.get("model_fingerprint")
+assert baseline_raw == canonical, (baseline_raw, canonical)
+if state_raw != canonical:
+    assert state_raw == legacy, (state_raw, legacy)
+pair_dir.mkdir(parents=True, exist_ok=True)
+(pair_dir / "model_fingerprint_reconciliation.json").write_text(
+    json.dumps(
+        {
+            "canonical_fingerprint": canonical,
+            "canonical_algorithm": "sha256(config hash + tokenizer hash + sorted safetensors name:size)",
+            "baseline_recorded_fingerprint": baseline_raw,
+            "state_recorded_fingerprint": state_raw,
+            "state_legacy_algorithm": "sha256(config hash + sorted safetensors/bin name:size)",
+            "legacy_reconciliation_used": state_raw != canonical,
+            "live_four_node_consistency_verified": True,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
+)
 assert b.get("topology") == s.get("initial_topology") == "1P3D"
 PY
 }

@@ -98,6 +98,10 @@ class Qwen80BABRunnerTest(unittest.TestCase):
         )
         self.assertNotIn('roles.count(\\"prefill\\")', runner_source)
 
+    def test_model_fingerprint_matches_clean_baseline_definition(self):
+        runner_source = RUNNER.read_text(encoding="utf-8")
+        self.assertEqual(runner_source.count("'${MODEL_PATH}/tokenizer.json'"), 3)
+
     def test_runner_can_copy_and_validate_a_frozen_natural_trace(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn('if [[ -n "${TRACE_SOURCE:-}" ]]', source)
