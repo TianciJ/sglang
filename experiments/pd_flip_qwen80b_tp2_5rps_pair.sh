@@ -266,7 +266,7 @@ PY
 write_pair_summary() {
   mkdir -p "${PAIR_DIR}"
   python3 - "${ARTIFACT_ROOT}/${BASELINE_RUN_ID}" "${ARTIFACT_ROOT}/${STATE_RUN_ID}" "${PAIR_DIR}" "${TRACE_SHA256}" <<'PY'
-import json, pathlib, statistics, sys
+import json, pathlib, sys
 baseline, state, out = map(pathlib.Path, sys.argv[1:4])
 expected_trace = sys.argv[4]
 b = json.load(open(baseline / "report" / "summary.json"))
@@ -282,9 +282,9 @@ summary = {
   "trace_sha256": expected_trace,
   "baseline": b,
   "state_machine": {
-    "requests": len(rows), "ttft_mean_s": statistics.fmean(ttft), "ttft_p95_s": percentile(ttft, .95),
+    "requests": len(rows), "ttft_mean_s": sum(ttft) / len(ttft), "ttft_p95_s": percentile(ttft, .95),
     "ttft_attainment": sum(bool(r.get("ttft_met")) for r in rows) / len(rows),
-    "tpot_mean_s": statistics.fmean(tpot), "tpot_p95_s": percentile(tpot, .95),
+    "tpot_mean_s": sum(tpot) / len(tpot), "tpot_p95_s": percentile(tpot, .95),
     "final_topology": controller["final_topology"], "controller": controller,
   },
 }
